@@ -40,6 +40,18 @@ def test_verify_chatwoot_signature_rejects_invalid_signature() -> None:
         )
 
 
+def test_verify_chatwoot_signature_rejects_non_ascii_signature() -> None:
+    with pytest.raises(WebhookSignatureError):
+        verify_chatwoot_signature(
+            raw_body=b"{}",
+            timestamp="1000",
+            signature="sha256=не-hex",
+            secret="secret",
+            now_seconds=1100,
+            tolerance_seconds=300,
+        )
+
+
 def test_verify_chatwoot_signature_rejects_old_timestamp() -> None:
     body = b"{}"
     timestamp = "1000"

@@ -35,5 +35,10 @@ def verify_chatwoot_signature(
     ).hexdigest()
     expected = f"sha256={expected_digest}"
 
-    if not hmac.compare_digest(expected, signature):
+    try:
+        signature_matches = hmac.compare_digest(expected, signature)
+    except TypeError as exc:
+        raise WebhookSignatureError("invalid signature") from exc
+
+    if not signature_matches:
         raise WebhookSignatureError("invalid signature")
