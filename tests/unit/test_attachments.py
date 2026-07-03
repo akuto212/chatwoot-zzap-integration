@@ -6,7 +6,7 @@ from app.services.attachments import AttachmentTooLargeError, ensure_attachment_
 
 
 def test_ensure_attachment_size_accepts_limit_boundary() -> None:
-    ensure_attachment_size(size_bytes=10, max_bytes=10)
+    ensure_attachment_size(10, 10)
 
 
 def test_ensure_attachment_size_rejects_large_file() -> None:
