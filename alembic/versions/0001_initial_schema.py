@@ -279,7 +279,7 @@ def upgrade() -> None:
     op.create_index(
         "ix_sync_jobs_claim",
         "sync_jobs",
-        ["integration_id", "status", "next_attempt_at", "created_at"],
+        ["status", "next_attempt_at", "created_at"],
         unique=False,
     )
 

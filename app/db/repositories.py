@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import JobStatus, SyncJob
@@ -33,6 +35,7 @@ async def claim_next_job(session: AsyncSession, *, worker_id: str) -> SyncJob | 
     job.locked_at = utcnow()
     job.locked_by = worker_id
     job.attempt_count += 1
+    await session.flush()
     return job
 
 
@@ -45,14 +48,17 @@ async def reset_stale_processing_jobs(
     current_time = now or utcnow()
     cutoff = current_time - older_than
     result = await session.execute(
-        select(SyncJob).where(
+        update(SyncJob)
+        .where(
             SyncJob.status == JobStatus.PROCESSING,
             SyncJob.locked_at < cutoff,
-        ),
+        )
+        .values(
+            status=JobStatus.PENDING,
+            locked_at=None,
+            locked_by=None,
+        )
+        .execution_options(synchronize_session=False),
     )
-    jobs = list(result.scalars())
-    for job in jobs:
-        job.status = JobStatus.PENDING
-        job.locked_at = None
-        job.locked_by = None
-    return len(jobs)
+    cursor_result = cast(CursorResult[object], result)
+    return cursor_result.rowcount or 0

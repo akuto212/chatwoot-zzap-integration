@@ -203,7 +203,7 @@ class MessageMapping(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 class SyncJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "sync_jobs"
     __table_args__ = (
-        Index("ix_sync_jobs_claim", "integration_id", "status", "next_attempt_at", "created_at"),
+        Index("ix_sync_jobs_claim", "status", "next_attempt_at", "created_at"),
         Index(
             "ix_sync_jobs_chatwoot_message",
             "integration_id",
