@@ -5,8 +5,8 @@ from app.services.outbound import ChatwootWebhookDecision, classify_chatwoot_mes
 
 def test_classify_ignores_wrong_event() -> None:
     decision = classify_chatwoot_message_created(
-        payload={"event": "conversation_updated"},
-        expected_inbox_id=2,
+        {"event": "conversation_updated"},
+        2,
     )
     assert decision == ChatwootWebhookDecision.IGNORE
 

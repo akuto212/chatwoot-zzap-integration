@@ -10,7 +10,6 @@ class ChatwootWebhookDecision(StrEnum):
 
 
 def classify_chatwoot_message_created(
-    *,
     payload: dict[str, Any],
     expected_inbox_id: int,
 ) -> ChatwootWebhookDecision:
