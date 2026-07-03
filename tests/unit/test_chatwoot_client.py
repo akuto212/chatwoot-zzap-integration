@@ -64,6 +64,39 @@ async def test_chatwoot_client_returns_contact_source_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chatwoot_client_rejects_contact_without_matching_inbox_source_id() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "payload": [
+                    {
+                        "id": 11,
+                        "contact_inboxes": [
+                            {"source_id": "wrong-source", "inbox": {"id": 999}},
+                        ],
+                    },
+                ],
+                "id": 11,
+            },
+        )
+
+    client = ChatwootClient(
+        base_url="https://chatwoot.example.test",
+        account_id=1,
+        api_token="token",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(ChatwootApiError):
+        await client.create_contact(
+            inbox_id=2,
+            name="Alice",
+            custom_attributes={"zzap_user_key": "user-1"},
+        )
+
+
+@pytest.mark.asyncio
 async def test_chatwoot_client_creates_conversation_with_source_id() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/v1/accounts/1/conversations"
@@ -123,6 +156,38 @@ async def test_chatwoot_client_resolves_relative_attachment_url_with_auth() -> N
     content = await client.download_attachment("/rails/active_storage/file.png")
 
     assert content == b"file"
+
+
+@pytest.mark.asyncio
+async def test_chatwoot_client_redirects_attachment_without_leaking_auth() -> None:
+    seen_requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append(request)
+        if request.url.host == "chatwoot.example.test":
+            assert request.headers["api_access_token"] == "token"
+            return httpx.Response(
+                302,
+                headers={"location": "https://storage.example.test/file.png"},
+            )
+        assert request.url == "https://storage.example.test/file.png"
+        assert "api_access_token" not in request.headers
+        return httpx.Response(200, content=b"file")
+
+    client = ChatwootClient(
+        base_url="https://chatwoot.example.test",
+        account_id=1,
+        api_token="token",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=True,
+        ),
+    )
+
+    content = await client.download_attachment("/rails/active_storage/file.png")
+
+    assert content == b"file"
+    assert len(seen_requests) == 2
 
 
 @pytest.mark.asyncio

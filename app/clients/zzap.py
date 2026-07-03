@@ -153,7 +153,7 @@ class ZZapClient:
 
 def _result_data(payload: dict[str, Any]) -> list[dict[str, Any]]:
     result = _result_object(payload)
-    data = result.get("data") or []
+    data = result.get("data")
     if not isinstance(data, list):
         raise ZZapApiError(200, "ZZap response result.data was not a list")
     if not all(isinstance(item, dict) for item in data):

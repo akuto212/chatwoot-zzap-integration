@@ -58,3 +58,18 @@ async def test_zzap_client_wraps_invalid_json_response() -> None:
 
     with pytest.raises(ZZapApiError):
         await client.list_threads(page=1, page_size=100)
+
+
+@pytest.mark.asyncio
+async def test_zzap_client_rejects_missing_result_data() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"success": True, "result": {}})
+
+    client = ZZapClient(
+        base_url="https://zzap.example.test",
+        api_key="secret",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(ZZapApiError):
+        await client.list_threads(page=1, page_size=100)

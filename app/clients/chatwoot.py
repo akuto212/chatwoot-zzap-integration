@@ -95,21 +95,26 @@ class ChatwootClient:
         return _required_int(payload, "id")
 
     async def download_attachment(self, url: str) -> bytes:
-        resolved_url = urljoin(f"{self._base_url}/", url)
-        parsed_url = urlparse(resolved_url)
-        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
-            raise ChatwootApiError(0, "invalid attachment URL")
-
-        base_url = urlparse(self._base_url)
-        headers = (
-            self._headers()
-            if (parsed_url.scheme, parsed_url.netloc) == (base_url.scheme, base_url.netloc)
-            else {}
-        )
-        response = await self._http.get(resolved_url, headers=headers)
-        if response.status_code >= 400:
-            raise ChatwootApiError(response.status_code, response.text)
-        return response.content
+        current_url = self._attachment_url(url)
+        for _ in range(5):
+            response = await self._http.get(
+                current_url,
+                headers=self._attachment_headers(current_url),
+                follow_redirects=False,
+            )
+            if response.status_code in {301, 302, 303, 307, 308}:
+                location = response.headers.get("location")
+                if not location:
+                    raise ChatwootApiError(
+                        response.status_code,
+                        "attachment redirect missing location",
+                    )
+                current_url = self._attachment_url(location, base_url=current_url)
+                continue
+            if response.status_code >= 400:
+                raise ChatwootApiError(response.status_code, response.text)
+            return response.content
+        raise ChatwootApiError(0, "attachment redirect limit exceeded")
 
     async def _request_json(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         response = await self._http.request(
@@ -134,6 +139,20 @@ class ChatwootClient:
     def _headers(self) -> dict[str, str]:
         return {"api_access_token": self._api_token}
 
+    def _attachment_url(self, url: str, *, base_url: str | None = None) -> str:
+        resolved_url = urljoin(base_url or f"{self._base_url}/", url)
+        parsed_url = urlparse(resolved_url)
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+            raise ChatwootApiError(0, "invalid attachment URL")
+        return resolved_url
+
+    def _attachment_headers(self, url: str) -> dict[str, str]:
+        parsed_url = urlparse(url)
+        base_url = urlparse(self._base_url)
+        if (parsed_url.scheme, parsed_url.netloc) == (base_url.scheme, base_url.netloc):
+            return self._headers()
+        return {}
+
 
 def _contact_from_payload(payload: dict[str, Any], *, inbox_id: int) -> ChatwootContactDto:
     contact = _contact_object(payload)
@@ -157,7 +176,6 @@ def _contact_object(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _source_id_for_inbox(contact: dict[str, Any], *, inbox_id: int) -> str | None:
-    first_source_id: str | None = None
     contact_inboxes = contact.get("contact_inboxes") or []
     if not isinstance(contact_inboxes, list):
         return None
@@ -168,7 +186,6 @@ def _source_id_for_inbox(contact: dict[str, Any], *, inbox_id: int) -> str | Non
         source_id = contact_inbox.get("source_id")
         if not source_id:
             continue
-        first_source_id = first_source_id or str(source_id)
         inbox = contact_inbox.get("inbox") or {}
         if not isinstance(inbox, dict):
             continue
@@ -177,7 +194,7 @@ def _source_id_for_inbox(contact: dict[str, Any], *, inbox_id: int) -> str | Non
                 return str(source_id)
         except (TypeError, ValueError):
             continue
-    return first_source_id
+    return None
 
 
 def _required_int(payload: dict[str, Any], key: str, *, fallback: Any = None) -> int:
