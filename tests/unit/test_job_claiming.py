@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import Table
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.schema import CreateIndex
 
 from app.db.models import JobStatus, JobType, SyncJob
 from app.db.repositories import (
@@ -45,15 +49,18 @@ def test_claim_job_statement_selects_one_due_pending_job_in_fifo_order() -> None
 
 
 def test_claim_index_matches_global_claim_query_shape() -> None:
+    table = cast(Table, SyncJob.__table__)
     claim_index = next(
-        index for index in SyncJob.__table__.indexes if index.name == "ix_sync_jobs_claim"
+        index for index in table.indexes if index.name == "ix_sync_jobs_claim"
     )
+    compiled = str(CreateIndex(claim_index).compile(dialect=postgresql.dialect()))
 
     assert [column.name for column in claim_index.columns] == [
         "status",
         "next_attempt_at",
         "created_at",
     ]
+    assert "next_attempt_at ASC NULLS FIRST" in compiled
 
 
 @pytest.mark.asyncio
@@ -67,7 +74,7 @@ async def test_claim_next_job_sets_lock_metadata_and_flushes() -> None:
     )
     session = _FakeSession(job=job)
 
-    claimed = await claim_next_job(session, worker_id="worker-1")
+    claimed = await claim_next_job(cast(AsyncSession, session), worker_id="worker-1")
 
     assert claimed is job
     assert job.status == JobStatus.PROCESSING
@@ -75,13 +82,17 @@ async def test_claim_next_job_sets_lock_metadata_and_flushes() -> None:
     assert job.locked_at is not None
     assert job.attempt_count == 1
     assert session.flushed is True
+    assert session.flushed_status == JobStatus.PROCESSING
+    assert session.flushed_locked_by == "worker-1"
+    assert session.flushed_locked_at is not None
+    assert session.flushed_attempt_count == 1
 
 
 @pytest.mark.asyncio
 async def test_claim_next_job_does_not_flush_when_no_job_is_due() -> None:
     session = _FakeSession(job=None)
 
-    claimed = await claim_next_job(session, worker_id="worker-1")
+    claimed = await claim_next_job(cast(AsyncSession, session), worker_id="worker-1")
 
     assert claimed is None
     assert session.flushed is False
@@ -93,7 +104,7 @@ async def test_reset_stale_processing_jobs_uses_conditional_update() -> None:
     session = _FakeUpdateSession(rowcount=2)
 
     reset_count = await reset_stale_processing_jobs(
-        session,
+        cast(AsyncSession, session),
         older_than=timedelta(minutes=10),
         now=now,
     )
@@ -117,12 +128,22 @@ class _FakeSession:
     def __init__(self, *, job: SyncJob | None) -> None:
         self.result = _ScalarResult(job)
         self.flushed = False
+        self.flushed_status: JobStatus | None = None
+        self.flushed_locked_by: str | None = None
+        self.flushed_locked_at: datetime | None = None
+        self.flushed_attempt_count: int | None = None
 
     async def execute(self, statement: object) -> _ScalarResult:
         return self.result
 
     async def flush(self) -> None:
         self.flushed = True
+        job = self.result.job
+        if job is not None:
+            self.flushed_status = job.status
+            self.flushed_locked_by = job.locked_by
+            self.flushed_locked_at = job.locked_at
+            self.flushed_attempt_count = job.attempt_count
 
 
 class _RowcountResult:
@@ -135,7 +156,7 @@ class _FakeUpdateSession:
         self.result = _RowcountResult(rowcount)
         self.compiled_statement: str | None = None
 
-    async def execute(self, statement: object) -> _RowcountResult:
+    async def execute(self, statement: _CompilableStatement) -> _RowcountResult:
         self.compiled_statement = str(
             statement.compile(
                 dialect=postgresql.dialect(),
@@ -143,3 +164,8 @@ class _FakeUpdateSession:
             ),
         )
         return self.result
+
+
+class _CompilableStatement(Protocol):
+    def compile(self, *args: Any, **kwargs: Any) -> object:
+        pass

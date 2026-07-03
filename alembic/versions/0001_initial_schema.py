@@ -276,11 +276,9 @@ def upgrade() -> None:
         ["integration_id", "chatwoot_message_id", "job_type"],
         unique=False,
     )
-    op.create_index(
-        "ix_sync_jobs_claim",
-        "sync_jobs",
-        ["status", "next_attempt_at", "created_at"],
-        unique=False,
+    op.execute(
+        "CREATE INDEX ix_sync_jobs_claim "
+        "ON sync_jobs (status, next_attempt_at ASC NULLS FIRST, created_at)",
     )
 
     op.create_table(
