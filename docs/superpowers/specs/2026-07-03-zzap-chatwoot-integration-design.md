@@ -280,7 +280,9 @@ Message text normalization for hashes:
 The service stores:
 
 - `message_hash = sha256(normalized_message_text)`
-- `fingerprint = sha256(integration_id + zzap_thread_user_key + sender_user_key + message_date + message_hash)`
+- `fingerprint = sha256(canonical_json_array([integration_id, zzap_thread_user_key, sender_user_key, message_date, message_hash]))`
+
+The fingerprint source must use unambiguous canonical serialization, not delimiter-based concatenation. The implementation uses a JSON array with compact separators and `ensure_ascii=false`, so `|` or other separator characters inside ZZap user keys cannot collapse distinct field tuples into the same source string.
 
 The original text may be cleared after successful delivery, but hashes and fingerprints are retained for deduplication.
 

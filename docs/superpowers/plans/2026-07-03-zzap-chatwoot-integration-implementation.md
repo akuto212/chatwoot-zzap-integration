@@ -773,6 +773,7 @@ Create `app/services/fingerprinting.py`:
 ```python
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
@@ -813,7 +814,7 @@ def build_zzap_fingerprint(
 ) -> MessageFingerprint:
     normalized_text = normalize_message_text(message_text)
     message_hash = sha256_hex(normalized_text)
-    fingerprint_source = "|".join(
+    fingerprint_source = json.dumps(
         [
             integration_id,
             thread_user_key,
@@ -821,6 +822,8 @@ def build_zzap_fingerprint(
             message_date.isoformat(),
             message_hash,
         ],
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
     return MessageFingerprint(message_hash=message_hash, fingerprint=sha256_hex(fingerprint_source))
 ```
