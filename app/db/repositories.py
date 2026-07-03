@@ -18,6 +18,7 @@ from app.db.models import (
     MessageMapping,
     MessageStatus,
     SyncJob,
+    WebhookDelivery,
     ZZapThread,
 )
 
@@ -219,6 +220,21 @@ async def get_chatwoot_conversation_by_thread_id(
     return result.scalar_one_or_none()
 
 
+async def get_chatwoot_conversation_by_chatwoot_id(
+    session: AsyncSession,
+    *,
+    integration_id: UUID,
+    chatwoot_conversation_id: int,
+) -> ChatwootConversation | None:
+    result = await session.execute(
+        select(ChatwootConversation).where(
+            ChatwootConversation.integration_id == integration_id,
+            ChatwootConversation.chatwoot_conversation_id == chatwoot_conversation_id,
+        ),
+    )
+    return result.scalar_one_or_none()
+
+
 async def create_chatwoot_conversation_mapping(
     session: AsyncSession,
     *,
@@ -255,6 +271,68 @@ def mark_message_mapping_delivered(
     mapping.status = MessageStatus.SUCCEEDED
     mapping.chatwoot_message_id = chatwoot_message_id
     mapping.chatwoot_conversation_id = chatwoot_conversation_id
+
+
+async def get_zzap_thread_by_id(
+    session: AsyncSession,
+    *,
+    thread_id: UUID,
+) -> ZZapThread | None:
+    return await session.get(ZZapThread, thread_id)
+
+
+async def has_chatwoot_message_mapping(
+    session: AsyncSession,
+    *,
+    integration_id: UUID,
+    chatwoot_message_id: int,
+) -> bool:
+    result = await session.execute(
+        select(MessageMapping.id).where(
+            MessageMapping.integration_id == integration_id,
+            MessageMapping.chatwoot_message_id == chatwoot_message_id,
+        ),
+    )
+    return result.scalar_one_or_none() is not None
+
+
+async def has_outbound_sync_job(
+    session: AsyncSession,
+    *,
+    integration_id: UUID,
+    chatwoot_message_id: int,
+) -> bool:
+    result = await session.execute(
+        select(SyncJob.id).where(
+            SyncJob.integration_id == integration_id,
+            SyncJob.chatwoot_message_id == chatwoot_message_id,
+            SyncJob.job_type == JobType.OUTBOUND_CHATWOOT_MESSAGE_TO_ZZAP,
+        ),
+    )
+    return result.scalar_one_or_none() is not None
+
+
+async def record_webhook_delivery(
+    session: AsyncSession,
+    *,
+    integration_id: UUID,
+    delivery_id: str,
+    event_name: str | None,
+    chatwoot_message_id: int | None,
+) -> bool:
+    statement = (
+        pg_insert(WebhookDelivery)
+        .values(
+            integration_id=integration_id,
+            delivery_id=delivery_id,
+            event_name=event_name,
+            chatwoot_message_id=chatwoot_message_id,
+        )
+        .on_conflict_do_nothing(index_elements=["integration_id", "delivery_id"])
+        .returning(WebhookDelivery.id)
+    )
+    result = await session.execute(statement)
+    return result.scalar_one_or_none() is not None
 
 
 def build_claim_job_statement(*, worker_id: str) -> Select[tuple[SyncJob]]:
