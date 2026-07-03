@@ -95,6 +95,7 @@ def upgrade() -> None:
         sa.Column("integration_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("zzap_user_key", sa.String(length=512), nullable=False),
         sa.Column("chatwoot_contact_id", sa.Integer(), nullable=False),
+        sa.Column("chatwoot_source_id", sa.String(length=512), nullable=True),
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column(
             "created_at",

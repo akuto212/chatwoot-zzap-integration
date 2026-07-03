@@ -125,6 +125,7 @@ class ChatwootContact(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     integration_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
     zzap_user_key: Mapped[str] = mapped_column(String(512), nullable=False)
     chatwoot_contact_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    chatwoot_source_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
 
 class ChatwootConversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
