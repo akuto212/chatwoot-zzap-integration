@@ -3,12 +3,11 @@ from __future__ import annotations
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
-from sqlalchemy.engine import make_url
 
 from alembic import context
 from app.db import models  # noqa: F401
+from app.db.alembic_config import get_alembic_database_url
 from app.db.base import Base
-from app.settings import Settings
 
 config = context.config
 
@@ -19,11 +18,7 @@ target_metadata = Base.metadata
 
 
 def get_url() -> str:
-    url = make_url(Settings().database_url)
-    if url.drivername == "postgresql+asyncpg":
-        # Alembic's synchronous engine cannot use the asyncpg driver directly.
-        url = url.set(drivername="postgresql")
-    return url.render_as_string(hide_password=False)
+    return get_alembic_database_url()
 
 
 def run_migrations_offline() -> None:

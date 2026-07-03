@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
@@ -51,10 +52,18 @@ class JobStatus(StrEnum):
     BLOCKED = "blocked"
 
 
-MESSAGE_DIRECTION_ENUM = Enum(MessageDirection, name="message_direction")
-MESSAGE_STATUS_ENUM = Enum(MessageStatus, name="message_status")
-JOB_TYPE_ENUM = Enum(JobType, name="job_type")
-JOB_STATUS_ENUM = Enum(JobStatus, name="job_status")
+def _build_str_enum_type(enum_class: type[StrEnum], *, name: str) -> Enum:
+    return Enum(
+        enum_class,
+        name=name,
+        values_callable=lambda enum_type: [member.value for member in enum_type],
+    )
+
+
+MessageDirectionType = _build_str_enum_type(MessageDirection, name="message_direction")
+MessageStatusType = _build_str_enum_type(MessageStatus, name="message_status")
+JobTypeType = _build_str_enum_type(JobType, name="job_type")
+JobStatusType = _build_str_enum_type(JobStatus, name="job_status")
 
 
 class ZZapThread(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -78,8 +87,18 @@ class ZZapThread(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=True,
     )
     message_last_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    unread_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    read_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    unread_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    read_only: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
     cursor_message_date: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -157,8 +176,8 @@ class MessageMapping(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     integration_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
-    direction: Mapped[MessageDirection] = mapped_column(MESSAGE_DIRECTION_ENUM, nullable=False)
-    status: Mapped[MessageStatus] = mapped_column(MESSAGE_STATUS_ENUM, nullable=False)
+    direction: Mapped[MessageDirection] = mapped_column(MessageDirectionType, nullable=False)
+    status: Mapped[MessageStatus] = mapped_column(MessageStatusType, nullable=False)
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     message_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     zzap_thread_id: Mapped[UUID | None] = mapped_column(
@@ -173,7 +192,12 @@ class MessageMapping(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     chatwoot_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chatwoot_conversation_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    is_cursor_guard: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_cursor_guard: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
 
 
 class SyncJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -189,9 +213,14 @@ class SyncJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     integration_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
-    job_type: Mapped[JobType] = mapped_column(JOB_TYPE_ENUM, nullable=False)
-    status: Mapped[JobStatus] = mapped_column(JOB_STATUS_ENUM, nullable=False)
-    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    job_type: Mapped[JobType] = mapped_column(JobTypeType, nullable=False)
+    status: Mapped[JobStatus] = mapped_column(JobStatusType, nullable=False)
+    attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     locked_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -206,7 +235,12 @@ class SyncJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("message_mappings.id", ondelete="SET NULL"),
         nullable=True,
     )
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
 
 
 class WebhookDelivery(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -234,4 +268,9 @@ class ServiceState(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     integration_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
     key: Mapped[str] = mapped_column(String(128), nullable=False)
-    value: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    value: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
