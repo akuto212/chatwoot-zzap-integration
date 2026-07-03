@@ -7,7 +7,14 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import ChatwootContact, ChatwootConversation, SyncJob
+from app.db.models import (
+    ChatwootContact,
+    ChatwootConversation,
+    MessageDirection,
+    MessageMapping,
+    MessageStatus,
+    SyncJob,
+)
 from app.db.repositories import (
     create_chatwoot_contact_mapping,
     create_chatwoot_conversation_mapping,
@@ -50,6 +57,11 @@ class InboundProcessor:
     async def process_job(self, session: AsyncSession, job: SyncJob) -> None:
         if job.zzap_thread_id is None:
             raise InboundProcessingError("inbound job is missing zzap_thread_id")
+        mapping = await self._load_mapping(session, job)
+        if mapping.status == MessageStatus.SUCCEEDED:
+            self._copy_delivered_mapping_to_job(job, mapping)
+            await session.flush()
+            return
 
         payload = job.payload
         zzap_user_key = _required_payload_string(payload, "zzap_user_key")
@@ -67,19 +79,35 @@ class InboundProcessor:
             content=content,
         )
 
-        if job.message_mapping_id is not None:
-            mapping = await get_message_mapping_by_id(session, mapping_id=job.message_mapping_id)
-            if mapping is not None:
-                mark_message_mapping_delivered(
-                    mapping,
-                    chatwoot_message_id=chatwoot_message_id,
-                    chatwoot_conversation_id=conversation.chatwoot_conversation_id,
-                )
+        mark_message_mapping_delivered(
+            mapping,
+            chatwoot_message_id=chatwoot_message_id,
+            chatwoot_conversation_id=conversation.chatwoot_conversation_id,
+        )
 
         job.chatwoot_conversation_id = conversation.chatwoot_conversation_id
         job.chatwoot_message_id = chatwoot_message_id
         job.payload = {}
         await session.flush()
+
+    async def _load_mapping(self, session: AsyncSession, job: SyncJob) -> MessageMapping:
+        if job.message_mapping_id is None:
+            raise InboundProcessingError("inbound job is missing message_mapping_id")
+        mapping = await get_message_mapping_by_id(session, mapping_id=job.message_mapping_id)
+        if mapping is None:
+            raise InboundProcessingError("inbound job message mapping was not found")
+        if mapping.integration_id != self.integration_id:
+            raise InboundProcessingError("inbound job message mapping integration mismatch")
+        if mapping.direction != MessageDirection.INBOUND:
+            raise InboundProcessingError("inbound job message mapping direction mismatch")
+        return mapping
+
+    def _copy_delivered_mapping_to_job(self, job: SyncJob, mapping: MessageMapping) -> None:
+        if mapping.chatwoot_message_id is None or mapping.chatwoot_conversation_id is None:
+            raise InboundProcessingError("delivered mapping is missing Chatwoot identifiers")
+        job.chatwoot_message_id = mapping.chatwoot_message_id
+        job.chatwoot_conversation_id = mapping.chatwoot_conversation_id
+        job.payload = {}
 
     async def _get_or_create_contact(
         self,

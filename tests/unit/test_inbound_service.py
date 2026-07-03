@@ -61,6 +61,94 @@ def test_should_not_import_cursor_guard_duplicate() -> None:
 
 
 @pytest.mark.asyncio
+async def test_inbound_processor_requires_mapping_before_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    integration_id = uuid4()
+    thread_id = uuid4()
+    job = SyncJob(
+        integration_id=integration_id,
+        job_type=JobType.INBOUND_ZZAP_MESSAGE_TO_CHATWOOT,
+        status=JobStatus.PROCESSING,
+        zzap_thread_id=thread_id,
+        message_mapping_id=uuid4(),
+        payload={
+            "zzap_user_key": "zzap-user",
+            "zzap_user_name": "Alice",
+            "message": "hello",
+        },
+    )
+    chatwoot = _FakeChatwootClient(message_id=30)
+
+    async def fake_get_mapping(*args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(inbound, "get_message_mapping_by_id", fake_get_mapping)
+
+    processor = InboundProcessor(
+        chatwoot_client=chatwoot,
+        inbox_id=2,
+        integration_id=integration_id,
+    )
+
+    with pytest.raises(inbound.InboundProcessingError):
+        await processor.process_job(cast(AsyncSession, _FakeSession()), job)
+
+    assert chatwoot.incoming_messages == []
+
+
+@pytest.mark.asyncio
+async def test_inbound_processor_short_circuits_already_delivered_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    integration_id = uuid4()
+    mapping_id = uuid4()
+    mapping = MessageMapping(
+        id=mapping_id,
+        integration_id=integration_id,
+        direction=MessageDirection.INBOUND,
+        status=MessageStatus.SUCCEEDED,
+        fingerprint="fingerprint",
+        message_hash="hash",
+        chatwoot_message_id=30,
+        chatwoot_conversation_id=20,
+    )
+    job = SyncJob(
+        integration_id=integration_id,
+        job_type=JobType.INBOUND_ZZAP_MESSAGE_TO_CHATWOOT,
+        status=JobStatus.PROCESSING,
+        zzap_thread_id=uuid4(),
+        message_mapping_id=mapping_id,
+        payload={
+            "zzap_user_key": "zzap-user",
+            "zzap_user_name": "Alice",
+            "message": "hello",
+        },
+    )
+    chatwoot = _FakeChatwootClient(message_id=999)
+    session = _FakeSession()
+
+    async def fake_get_mapping(*args: object, **kwargs: object) -> MessageMapping:
+        return mapping
+
+    monkeypatch.setattr(inbound, "get_message_mapping_by_id", fake_get_mapping)
+
+    processor = InboundProcessor(
+        chatwoot_client=chatwoot,
+        inbox_id=2,
+        integration_id=integration_id,
+    )
+
+    await processor.process_job(cast(AsyncSession, session), job)
+
+    assert chatwoot.incoming_messages == []
+    assert job.chatwoot_message_id == 30
+    assert job.chatwoot_conversation_id == 20
+    assert job.payload == {}
+    assert session.flushed is True
+
+
+@pytest.mark.asyncio
 async def test_inbound_processor_delivers_message_and_clears_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
