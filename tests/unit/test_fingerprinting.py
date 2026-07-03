@@ -37,3 +37,24 @@ def test_build_zzap_fingerprint_is_stable() -> None:
     assert len(fingerprint.message_hash) == 64
     assert len(fingerprint.fingerprint) == 64
     assert fingerprint.message_hash == sha256_hex("hello\nworld")
+
+
+def test_build_zzap_fingerprint_uses_unambiguous_source_encoding() -> None:
+    message_date = datetime(2025, 4, 29, 21, 6, 45, tzinfo=ZoneInfo("Europe/Moscow"))
+
+    first = build_zzap_fingerprint(
+        integration_id="a|b",
+        thread_user_key="c",
+        sender_user_key="d",
+        message_date=message_date,
+        message_text="hello",
+    )
+    second = build_zzap_fingerprint(
+        integration_id="a",
+        thread_user_key="b|c",
+        sender_user_key="d",
+        message_date=message_date,
+        message_text="hello",
+    )
+
+    assert first.fingerprint != second.fingerprint
