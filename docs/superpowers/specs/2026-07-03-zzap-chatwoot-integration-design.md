@@ -117,28 +117,30 @@ The container entrypoint runs `alembic upgrade head` before starting the selecte
 
 The worker polls ZZap with an adaptive summary-first scheduler.
 
-1. Every 3 seconds, if no summary poll is already pending, the worker schedules `GET /api/client/v1/messages?page=1&page_size=100`.
-2. All ZZap requests, including uploads and outbound sends, pass through one global rate limiter: not more than one request every 3 seconds.
-3. Only the first ZZap thread page is tracked in the first release.
-4. Each returned thread updates `zzap_threads` with:
+1. The summary poll becomes due every 3 seconds. If no summary poll is already pending, the worker schedules `GET /api/client/v1/messages?page=1&page_size=100`.
+2. The scheduled summary poll is still just one ZZap action in the shared FIFO queue. It executes only when it reaches the front of the queue and the global ZZap limiter allows the next request.
+3. All ZZap requests, including uploads and outbound sends, pass through one global rate limiter: not more than one request every 3 seconds.
+4. If the ZZap action queue has backlog, the actual interval between summary polls grows. Low latency is best effort under the API limit, not a guarantee.
+5. Only the first ZZap thread page is tracked in the first release.
+6. Each returned thread updates `zzap_threads` with:
    - `user_name`
    - `message_last_date`
    - `message_last_hash`
    - `unread_count`
    - `read_only`
    - polling state
-5. A thread is considered changed if any of these changed:
+7. A thread is considered changed if any of these changed:
    - `message_last_date`
    - `message_last_hash`
    - `unread_count`
-6. Changed threads schedule one fetch action per thread. Duplicate pending fetches for the same thread are coalesced.
-7. Thread messages are fetched through `GET /api/client/v1/messages/{user_key}` with:
+8. Changed threads schedule one fetch action per thread. Duplicate pending fetches for the same thread are coalesced.
+9. Thread messages are fetched through `GET /api/client/v1/messages/{user_key}` with:
    - `page_size = min(100, max(20, unread_count + 5))`
-8. Fetched messages are normalized and imported in chronological order. If timestamps are equal, the original response index is used as a tie-breaker. The actual ZZap response ordering must be verified during integration testing.
-9. New messages are detected through cursor plus fingerprint overlap.
-10. For every new message fingerprint, the service creates an inbound job.
-11. The inbound job creates the Chatwoot contact and conversation if needed, reopens the conversation as `open`, and creates an incoming Chatwoot message.
-12. After successful delivery, message text and temporary payload data are cleared. Hashes, fingerprints, external IDs, and status remain.
+10. Fetched messages are normalized and imported in chronological order. If timestamps are equal, the original response index is used as a tie-breaker. The actual ZZap response ordering must be verified during integration testing.
+11. New messages are detected through cursor plus fingerprint overlap.
+12. For every new message fingerprint, the service creates an inbound job.
+13. The inbound job creates the Chatwoot contact and conversation if needed, reopens the conversation as `open`, and creates an incoming Chatwoot message.
+14. After successful delivery, message text and temporary payload data are cleared. Hashes, fingerprints, external IDs, and status remain.
 
 Bootstrap behavior:
 
@@ -147,6 +149,19 @@ Bootstrap behavior:
 - Old read history is not imported.
 
 ZZap timestamps without timezone are interpreted as `Europe/Moscow` and stored as timezone-aware timestamps.
+
+Cursor and overlap algorithm:
+
+- Each `zzap_threads` row stores a per-thread cursor, at minimum `cursor_message_date`, plus boundary data derived from the latest known summary/message hash.
+- During bootstrap for a thread without unread messages, the service records a baseline cursor from the thread summary and does not create Chatwoot entities.
+- During bootstrap for a thread with unread messages, the service fetches the thread and creates inbound jobs only for the unread/current window.
+- During normal polling, fetched messages are split into candidates by timestamp:
+  - `message_date > cursor_message_date`: candidate for import.
+  - `message_date == cursor_message_date`: candidate only if its fingerprint is not already known and it is not the stored baseline/boundary duplicate.
+  - `message_date < cursor_message_date`: not imported solely because the fingerprint is missing. This prevents old messages from being re-imported after retention cleanup.
+- For every candidate, the service computes the fingerprint and inserts the mapping/job idempotently in one database transaction.
+- The thread cursor advances only after mappings/jobs for the fetched window have been persisted, not merely after the ZZap fetch succeeds.
+- Retention cleanup must preserve the latest cursor guard fingerprints for each thread, even if those records are older than the normal successful-message retention window.
 
 ## Chatwoot To ZZap Flow
 
@@ -206,11 +221,12 @@ Tables:
   - Maps ZZap thread/contact to `chatwoot_conversation_id`.
 - `message_mappings`
   - Stores direction, message fingerprint, message hash, external message IDs when available, status, and timestamps.
-  - Successful records are retained by configurable retention, default 60 days.
+  - Successful records are retained by configurable retention, default 60 days, except records still needed as per-thread cursor guards.
 - `sync_jobs`
   - Universal durable job table.
   - Indexed fields for job type, status, next attempt, external IDs, mappings.
   - JSONB payload only for temporary job details.
+  - Includes lock fields such as `locked_at` and `locked_by` for atomic job claiming and crash recovery.
 - `webhook_deliveries`
   - Stores delivery ID, event name, received time, optional Chatwoot message ID.
   - Does not store raw payload.
@@ -240,6 +256,14 @@ Tables:
 Retrying jobs remain `pending` with `attempt_count > 0` and `next_attempt_at`.
 
 The worker processes one job per cycle, FIFO by `next_attempt_at` and then `created_at`.
+
+Job claiming must be atomic:
+
+- The worker selects one eligible `pending` job and marks it `processing` in the same database transaction.
+- The selection uses row locking, for example `SELECT ... FOR UPDATE SKIP LOCKED`, or an equivalent SQLAlchemy Core expression.
+- The claim stores `locked_at`, `locked_by`, and the attempt start metadata before external API calls begin.
+- If the process crashes while a job is `processing`, a later worker run can detect stale locks and return the job to `pending` when attempts remain.
+- If attempts are exhausted, stale or failed jobs move to `failed` or `blocked` according to the job outcome.
 
 ## Idempotency And Fingerprints
 
@@ -272,6 +296,8 @@ Raw webhook payload is never stored.
 ## Rate Limiting And Scheduling
 
 ZZap has a strict global request limit for this integration: not more than one request every 3 seconds.
+
+The 3-second summary polling interval is a scheduling target. It does not reserve every ZZap slot for summary polling. When fetches, uploads, or outbound sends are queued, summary polling waits its turn in the shared FIFO queue.
 
 All ZZap actions go through the same FIFO limiter:
 
@@ -347,6 +373,7 @@ Cleanup runs:
 Retention:
 
 - Successful message mappings: configurable, default 60 days.
+- Per-thread cursor guard mappings are preserved even when older than the successful-message retention window.
 - Failed jobs/message records: default 30 days.
 - Webhook deliveries: configurable, default 30 days.
 
