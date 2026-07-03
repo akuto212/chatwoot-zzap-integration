@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -53,7 +54,7 @@ class ZZapClient:
                 message_last=item.get("message_last"),
                 read_only=bool(item.get("read_only")),
             )
-            for item in payload.get("result", {}).get("data") or []
+            for item in _result_data(payload)
             if item.get("user_key")
         ]
 
@@ -64,9 +65,10 @@ class ZZapClient:
         page: int,
         page_size: int,
     ) -> list[ZZapMessageDto]:
+        encoded_user_key = quote(user_key, safe="")
         payload = await self._request_json(
             "GET",
-            f"/api/client/v1/messages/{user_key}",
+            f"/api/client/v1/messages/{encoded_user_key}",
             params={"page": page, "page_size": page_size},
         )
         return [
@@ -77,7 +79,7 @@ class ZZapClient:
                 message=item.get("message"),
                 unread=item.get("unread"),
             )
-            for item in payload.get("result", {}).get("data") or []
+            for item in _result_data(payload)
         ]
 
     async def upload_file(
@@ -96,7 +98,8 @@ class ZZapClient:
                 "upload_type": upload_type,
             },
         )
-        file_url = payload.get("result", {}).get("file_url")
+        result = _result_object(payload)
+        file_url = result.get("file_url")
         if not file_url:
             raise ZZapApiError(200, "ZZap upload response did not include file_url")
         return str(file_url)
@@ -129,10 +132,37 @@ class ZZapClient:
         )
         if response.status_code >= 400:
             raise ZZapApiError(response.status_code, response.text)
-        payload = response.json()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ZZapApiError(response.status_code, "ZZap response was not valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise ZZapApiError(response.status_code, "ZZap response was not a JSON object")
         if payload.get("success") is False:
+            error_code = response.status_code
+            try:
+                error_code = int(payload.get("code") or response.status_code)
+            except (TypeError, ValueError):
+                pass
             raise ZZapApiError(
-                int(payload.get("code") or response.status_code),
+                error_code,
                 str(payload.get("errors")),
             )
         return payload
+
+
+def _result_data(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    result = _result_object(payload)
+    data = result.get("data") or []
+    if not isinstance(data, list):
+        raise ZZapApiError(200, "ZZap response result.data was not a list")
+    if not all(isinstance(item, dict) for item in data):
+        raise ZZapApiError(200, "ZZap response result.data contained invalid items")
+    return data
+
+
+def _result_object(payload: dict[str, Any]) -> dict[str, Any]:
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        raise ZZapApiError(200, "ZZap response did not include result object")
+    return result

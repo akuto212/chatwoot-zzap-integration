@@ -1397,12 +1397,23 @@ class ZZapClient:
 
 Create `app/clients/chatwoot.py` with methods for contact, conversation, messages, private notes, and attachment download:
 
+Implementation note: official Chatwoot API documentation requires `source_id` when creating
+a conversation. `create_contact` must therefore return both `contact_id` and the matching
+`source_id` from `contact_inboxes`, and `create_conversation` must send that `source_id`.
+
 ```python
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+
+@dataclass(frozen=True)
+class ChatwootContactDto:
+    contact_id: int
+    source_id: str
 
 
 class ChatwootApiError(RuntimeError):
@@ -1418,19 +1429,19 @@ class ChatwootClient:
         self._api_token = api_token
         self._http = http_client
 
-    async def create_contact(self, *, inbox_id: int, name: str, custom_attributes: dict[str, str]) -> int:
+    async def create_contact(self, *, inbox_id: int, name: str, custom_attributes: dict[str, str]) -> ChatwootContactDto:
         payload = await self._request_json(
             "POST",
             "/contacts",
             json={"inbox_id": inbox_id, "name": name, "custom_attributes": custom_attributes},
         )
-        return int(payload["payload"]["contact"]["id"] if "payload" in payload else payload["id"])
+        ...
 
-    async def create_conversation(self, *, inbox_id: int, contact_id: int, status: str = "open") -> int:
+    async def create_conversation(self, *, inbox_id: int, contact_id: int, source_id: str, status: str = "open") -> int:
         payload = await self._request_json(
             "POST",
             "/conversations",
-            json={"inbox_id": inbox_id, "contact_id": contact_id, "status": status},
+            json={"source_id": source_id, "inbox_id": inbox_id, "contact_id": contact_id, "status": status},
         )
         return int(payload["id"])
 

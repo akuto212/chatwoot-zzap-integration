@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
 import httpx
+
+
+@dataclass(frozen=True)
+class ChatwootContactDto:
+    contact_id: int
+    source_id: str
 
 
 class ChatwootApiError(RuntimeError):
@@ -31,7 +39,7 @@ class ChatwootClient:
         inbox_id: int,
         name: str,
         custom_attributes: dict[str, str],
-    ) -> int:
+    ) -> ChatwootContactDto:
         payload = await self._request_json(
             "POST",
             "/contacts",
@@ -41,21 +49,27 @@ class ChatwootClient:
                 "custom_attributes": custom_attributes,
             },
         )
-        return int(payload["payload"]["contact"]["id"] if "payload" in payload else payload["id"])
+        return _contact_from_payload(payload, inbox_id=inbox_id)
 
     async def create_conversation(
         self,
         *,
         inbox_id: int,
         contact_id: int,
+        source_id: str,
         status: str = "open",
     ) -> int:
         payload = await self._request_json(
             "POST",
             "/conversations",
-            json={"inbox_id": inbox_id, "contact_id": contact_id, "status": status},
+            json={
+                "source_id": source_id,
+                "inbox_id": inbox_id,
+                "contact_id": contact_id,
+                "status": status,
+            },
         )
-        return int(payload["id"])
+        return _required_int(payload, "id")
 
     async def update_conversation_status(self, *, conversation_id: int, status: str) -> None:
         await self._request_json(
@@ -70,7 +84,7 @@ class ChatwootClient:
             f"/conversations/{conversation_id}/messages",
             json={"content": content, "message_type": "incoming"},
         )
-        return int(payload["id"])
+        return _required_int(payload, "id")
 
     async def create_private_note(self, *, conversation_id: int, content: str) -> int:
         payload = await self._request_json(
@@ -78,10 +92,21 @@ class ChatwootClient:
             f"/conversations/{conversation_id}/messages",
             json={"content": content, "private": True},
         )
-        return int(payload["id"])
+        return _required_int(payload, "id")
 
     async def download_attachment(self, url: str) -> bytes:
-        response = await self._http.get(url, headers=self._headers())
+        resolved_url = urljoin(f"{self._base_url}/", url)
+        parsed_url = urlparse(resolved_url)
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+            raise ChatwootApiError(0, "invalid attachment URL")
+
+        base_url = urlparse(self._base_url)
+        headers = (
+            self._headers()
+            if (parsed_url.scheme, parsed_url.netloc) == (base_url.scheme, base_url.netloc)
+            else {}
+        )
+        response = await self._http.get(resolved_url, headers=headers)
         if response.status_code >= 400:
             raise ChatwootApiError(response.status_code, response.text)
         return response.content
@@ -95,7 +120,69 @@ class ChatwootClient:
         )
         if response.status_code >= 400:
             raise ChatwootApiError(response.status_code, response.text)
-        return response.json()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ChatwootApiError(
+                response.status_code,
+                "Chatwoot response was not valid JSON",
+            ) from exc
+        if not isinstance(payload, dict):
+            raise ChatwootApiError(response.status_code, "Chatwoot response was not a JSON object")
+        return payload
 
     def _headers(self) -> dict[str, str]:
         return {"api_access_token": self._api_token}
+
+
+def _contact_from_payload(payload: dict[str, Any], *, inbox_id: int) -> ChatwootContactDto:
+    contact = _contact_object(payload)
+    contact_id = _required_int(contact, "id", fallback=payload.get("id"))
+    source_id = _source_id_for_inbox(contact, inbox_id=inbox_id)
+    if not source_id:
+        raise ChatwootApiError(200, "Chatwoot contact response did not include source_id")
+    return ChatwootContactDto(contact_id=contact_id, source_id=source_id)
+
+
+def _contact_object(payload: dict[str, Any]) -> dict[str, Any]:
+    payload_value = payload.get("payload")
+    if isinstance(payload_value, list) and payload_value and isinstance(payload_value[0], dict):
+        return payload_value[0]
+    if isinstance(payload_value, dict):
+        nested_contact = payload_value.get("contact")
+        if isinstance(nested_contact, dict):
+            return nested_contact
+        return payload_value
+    return payload
+
+
+def _source_id_for_inbox(contact: dict[str, Any], *, inbox_id: int) -> str | None:
+    first_source_id: str | None = None
+    contact_inboxes = contact.get("contact_inboxes") or []
+    if not isinstance(contact_inboxes, list):
+        return None
+
+    for contact_inbox in contact_inboxes:
+        if not isinstance(contact_inbox, dict):
+            continue
+        source_id = contact_inbox.get("source_id")
+        if not source_id:
+            continue
+        first_source_id = first_source_id or str(source_id)
+        inbox = contact_inbox.get("inbox") or {}
+        if not isinstance(inbox, dict):
+            continue
+        try:
+            if int(inbox.get("id") or 0) == inbox_id:
+                return str(source_id)
+        except (TypeError, ValueError):
+            continue
+    return first_source_id
+
+
+def _required_int(payload: dict[str, Any], key: str, *, fallback: Any = None) -> int:
+    value = payload.get(key, fallback)
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ChatwootApiError(200, f"Chatwoot response did not include integer {key}") from exc
