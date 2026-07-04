@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.clients.chatwoot import ChatwootContactDto
 from app.db.models import (
     ChatwootContact,
     ChatwootConversation,
@@ -30,6 +31,7 @@ def test_should_import_message_newer_than_cursor() -> None:
         message_date=message_date,
         cursor_message_date=cursor,
         fingerprint="new",
+        message_hash="new-hash",
         known_fingerprints={"old"},
         cursor_guard_fingerprint="old",
     )
@@ -43,6 +45,7 @@ def test_should_not_import_older_message_even_if_fingerprint_missing() -> None:
         message_date=message_date,
         cursor_message_date=cursor,
         fingerprint="missing-after-retention",
+        message_hash="missing-hash",
         known_fingerprints=set(),
         cursor_guard_fingerprint="old",
     )
@@ -55,8 +58,22 @@ def test_should_not_import_cursor_guard_duplicate() -> None:
         message_date=cursor,
         cursor_message_date=cursor,
         fingerprint="guard",
+        message_hash="hash",
         known_fingerprints=set(),
         cursor_guard_fingerprint="guard",
+    )
+
+
+def test_should_not_import_cursor_guard_duplicate_when_guard_is_summary_hash() -> None:
+    cursor = datetime(2025, 1, 1, 10, 0, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+
+    assert not should_import_zzap_message(
+        message_date=cursor,
+        cursor_message_date=cursor,
+        fingerprint="full-fingerprint",
+        message_hash="summary-hash",
+        known_fingerprints=set(),
+        cursor_guard_fingerprint="summary-hash",
     )
 
 
@@ -222,6 +239,80 @@ async def test_inbound_processor_delivers_message_and_clears_payload(
     assert session.flushed is True
 
 
+@pytest.mark.asyncio
+async def test_inbound_processor_creates_contact_with_source_attribute_and_fallback_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    integration_id = uuid4()
+    thread_id = uuid4()
+    mapping_id = uuid4()
+    mapping = MessageMapping(
+        id=mapping_id,
+        integration_id=integration_id,
+        direction=MessageDirection.INBOUND,
+        status=MessageStatus.PENDING,
+        fingerprint="fingerprint",
+        message_hash="hash",
+    )
+    contact = ChatwootContact(
+        integration_id=integration_id,
+        zzap_user_key="abcdef123456",
+        chatwoot_contact_id=10,
+        chatwoot_source_id="source-1",
+    )
+    conversation = ChatwootConversation(
+        integration_id=integration_id,
+        zzap_thread_id=thread_id,
+        chatwoot_contact_id=contact.id,
+        chatwoot_conversation_id=20,
+    )
+    job = SyncJob(
+        integration_id=integration_id,
+        job_type=JobType.INBOUND_ZZAP_MESSAGE_TO_CHATWOOT,
+        status=JobStatus.PROCESSING,
+        zzap_thread_id=thread_id,
+        message_mapping_id=mapping_id,
+        payload={
+            "zzap_user_key": "abcdef123456",
+            "message": "hello",
+        },
+    )
+    chatwoot = _FakeChatwootClient(message_id=30)
+
+    async def fake_get_contact(*args: object, **kwargs: object) -> None:
+        return None
+
+    async def fake_create_contact_mapping(*args: object, **kwargs: object) -> ChatwootContact:
+        return contact
+
+    async def fake_get_conversation(*args: object, **kwargs: object) -> ChatwootConversation:
+        return conversation
+
+    async def fake_get_mapping(*args: object, **kwargs: object) -> MessageMapping:
+        return mapping
+
+    monkeypatch.setattr(inbound, "get_chatwoot_contact_by_zzap_user_key", fake_get_contact)
+    monkeypatch.setattr(inbound, "create_chatwoot_contact_mapping", fake_create_contact_mapping)
+    monkeypatch.setattr(inbound, "get_chatwoot_conversation_by_thread_id", fake_get_conversation)
+    monkeypatch.setattr(inbound, "get_message_mapping_by_id", fake_get_mapping)
+
+    processor = InboundProcessor(
+        chatwoot_client=chatwoot,
+        inbox_id=2,
+        integration_id=integration_id,
+    )
+
+    await processor.process_job(cast(AsyncSession, _FakeSession()), job)
+
+    assert chatwoot.created_contacts == [
+        (
+            2,
+            "ZZap abcdef12",
+            {"source": "zzap", "zzap_user_key": "abcdef123456"},
+        ),
+    ]
+
+
 class _FakeSession:
     def __init__(self) -> None:
         self.flushed = False
@@ -235,6 +326,17 @@ class _FakeChatwootClient:
         self.message_id = message_id
         self.opened_conversation_id: int | None = None
         self.incoming_messages: list[tuple[int, str]] = []
+        self.created_contacts: list[tuple[int, str, dict[str, str]]] = []
+
+    async def create_contact(
+        self,
+        *,
+        inbox_id: int,
+        name: str,
+        custom_attributes: dict[str, str],
+    ) -> ChatwootContactDto:
+        self.created_contacts.append((inbox_id, name, custom_attributes))
+        return ChatwootContactDto(contact_id=10, source_id="source-1")
 
     async def update_conversation_status(self, *, conversation_id: int, status: str) -> None:
         assert status == "open"

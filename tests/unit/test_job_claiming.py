@@ -101,7 +101,7 @@ async def test_claim_next_job_does_not_flush_when_no_job_is_due() -> None:
 @pytest.mark.asyncio
 async def test_reset_stale_processing_jobs_uses_conditional_update() -> None:
     now = datetime(2026, 7, 3, tzinfo=UTC)
-    session = _FakeUpdateSession(rowcount=2)
+    session = _FakeUpdateSession(rowcounts=[1, 2])
 
     reset_count = await reset_stale_processing_jobs(
         cast(AsyncSession, session),
@@ -109,11 +109,23 @@ async def test_reset_stale_processing_jobs_uses_conditional_update() -> None:
         now=now,
     )
 
-    assert reset_count == 2
-    assert session.compiled_statement is not None
-    assert session.compiled_statement.startswith("UPDATE sync_jobs")
-    assert "sync_jobs.status = 'processing'" in session.compiled_statement
-    assert "sync_jobs.locked_at <" in session.compiled_statement
+    assert reset_count == 3
+    assert len(session.compiled_statements) == 2
+    failed_update = session.compiled_statements[0]
+    assert failed_update.startswith("UPDATE sync_jobs")
+    assert "status='failed'" in failed_update
+    assert "sync_jobs.status = 'processing'" in failed_update
+    assert "sync_jobs.locked_at <" in failed_update
+    assert "sync_jobs.attempt_count >= 5" in failed_update
+    assert "sync_jobs.attempt_count >= 3" in failed_update
+
+    pending_update = session.compiled_statements[1]
+    assert pending_update.startswith("UPDATE sync_jobs")
+    assert "status='pending'" in pending_update
+    assert "sync_jobs.status = 'processing'" in pending_update
+    assert "sync_jobs.locked_at <" in pending_update
+    assert "sync_jobs.attempt_count < 5" in pending_update
+    assert "sync_jobs.attempt_count < 3" in pending_update
 
 
 class _ScalarResult:
@@ -152,18 +164,20 @@ class _RowcountResult:
 
 
 class _FakeUpdateSession:
-    def __init__(self, *, rowcount: int) -> None:
-        self.result = _RowcountResult(rowcount)
-        self.compiled_statement: str | None = None
+    def __init__(self, *, rowcounts: list[int]) -> None:
+        self.rowcounts = rowcounts
+        self.compiled_statements: list[str] = []
 
     async def execute(self, statement: _CompilableStatement) -> _RowcountResult:
-        self.compiled_statement = str(
-            statement.compile(
-                dialect=postgresql.dialect(),
-                compile_kwargs={"literal_binds": True},
+        self.compiled_statements.append(
+            str(
+                statement.compile(
+                    dialect=postgresql.dialect(),
+                    compile_kwargs={"literal_binds": True},
+                ),
             ),
         )
-        return self.result
+        return _RowcountResult(self.rowcounts.pop(0))
 
 
 class _CompilableStatement(Protocol):

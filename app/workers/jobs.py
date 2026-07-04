@@ -54,6 +54,7 @@ INBOUND_RETRY_DELAYS = [
 ]
 MAX_OUTBOUND_ATTEMPTS = 3
 MAX_INBOUND_ATTEMPTS = 5
+CLEANUP_INTERVAL = timedelta(days=1)
 
 
 def retry_delay_for_attempt(*, direction: str, attempt_count: int) -> timedelta | None:
@@ -62,6 +63,13 @@ def retry_delay_for_attempt(*, direction: str, attempt_count: int) -> timedelta 
     if index < 0 or index >= len(delays):
         return None
     return delays[index]
+
+
+def _constant_datetime(value: datetime) -> Callable[[], datetime]:
+    def _now() -> datetime:
+        return value
+
+    return _now
 
 
 class RateLimitedZZapClient:
@@ -154,8 +162,20 @@ async def run_worker_loop(settings: Settings) -> None:
                 try:
                     if not await try_worker_advisory_lock(lock_session):
                         raise RuntimeError("another worker already holds the advisory lock")
-                    await _run_cleanup_once(session_factory=session_factory, settings=settings)
+                    last_cleanup_at = datetime.now(tz=UTC)
+                    await _run_cleanup_once(
+                        session_factory=session_factory,
+                        settings=settings,
+                        now=last_cleanup_at,
+                    )
                     while True:
+                        iteration_time = datetime.now(tz=UTC)
+                        last_cleanup_at = await run_periodic_cleanup_if_due(
+                            session_factory=session_factory,
+                            settings=settings,
+                            last_cleanup_at=last_cleanup_at,
+                            now=iteration_time,
+                        )
                         did_work = await run_worker_iteration(
                             session_factory=session_factory,
                             settings=settings,
@@ -166,6 +186,7 @@ async def run_worker_loop(settings: Settings) -> None:
                             zzap_client=zzap_client,
                             action_queue=action_queue,
                             rate_limiter=rate_limiter,
+                            now=_constant_datetime(iteration_time),
                         )
                         if not did_work:
                             await asyncio.sleep(1.0)
@@ -314,6 +335,8 @@ async def process_next_zzap_action(
                 )
             return True
     except Exception as exc:
+        if action.action_type == ZZapActionType.THREAD_FETCH and action.thread_user_key:
+            action_queue.enqueue_thread_fetch(action.thread_user_key)
         _delay_zzap_poll_after_error(action_queue, now=current_monotonic, exc=exc)
         async with session_scope(session_factory) as session:
             await _record_external_auth_failure(
@@ -506,6 +529,7 @@ async def _run_cleanup_once(
     *,
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
+    now: datetime | None = None,
 ) -> None:
     async with session_scope(session_factory) as session:
         await cleanup_old_records(
@@ -515,7 +539,21 @@ async def _run_cleanup_once(
             ),
             failed_record_retention=timedelta(days=settings.failed_record_retention_days),
             webhook_delivery_retention=timedelta(days=settings.webhook_delivery_retention_days),
+            now=now,
         )
+
+
+async def run_periodic_cleanup_if_due(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    last_cleanup_at: datetime,
+    now: datetime,
+) -> datetime:
+    if now - last_cleanup_at < CLEANUP_INTERVAL:
+        return last_cleanup_at
+    await _run_cleanup_once(session_factory=session_factory, settings=settings, now=now)
+    return now
 
 
 async def _process_summary_threads(
@@ -586,6 +624,7 @@ async def _persist_thread_messages(
             fingerprint=item.fingerprint.fingerprint,
             known_fingerprints=known_fingerprints,
             cursor_guard_fingerprint=thread.cursor_guard_fingerprint,
+            message_hash=item.fingerprint.message_hash,
         ):
             continue
         if thread.cursor_message_date is None and item.unread is not True:

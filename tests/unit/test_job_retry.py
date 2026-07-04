@@ -16,14 +16,21 @@ from app.db.models import (
     MessageStatus,
     SyncJob,
 )
+from app.workers import jobs
 from app.workers.cleanup import cleanup_old_records
-from app.workers.jobs import RateLimitedZZapClient, process_claimed_job, retry_delay_for_attempt
+from app.workers.jobs import (
+    RateLimitedZZapClient,
+    process_claimed_job,
+    process_next_zzap_action,
+    retry_delay_for_attempt,
+)
 from app.workers.locks import (
     ADVISORY_LOCK_KEY,
     release_worker_advisory_lock,
     try_worker_advisory_lock,
 )
 from app.workers.rate_limit import ZZapRateLimiter
+from app.workers.zzap_scheduler import ZZapActionQueue, ZZapActionType
 
 
 def test_outbound_retry_schedule() -> None:
@@ -327,6 +334,74 @@ async def test_rate_limited_zzap_client_waits_between_requests() -> None:
     assert inner.calls == ["upload", "send"]
 
 
+@pytest.mark.asyncio
+async def test_failed_thread_fetch_is_requeued_after_zzap_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    integration_id = uuid4()
+    thread = _FakeThread(id=uuid4(), integration_id=integration_id, user_key="thread-1")
+    queue = ZZapActionQueue()
+    queue.enqueue_thread_fetch("thread-1")
+
+    async def fake_get_thread(*args: object, **kwargs: object) -> _FakeThread:
+        return thread
+
+    async def fake_record_external_auth_failure(*args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(jobs, "_get_thread_by_user_key", fake_get_thread)
+    monkeypatch.setattr(jobs, "_record_external_auth_failure", fake_record_external_auth_failure)
+    monkeypatch.setattr(jobs, "session_scope", lambda session_factory: _FakeSessionScope())
+
+    did_work = await process_next_zzap_action(
+        session_factory=cast(Any, object()),
+        settings=cast(Any, _FakeSettings(integration_id=integration_id)),
+        zzap_client=_FailingZZapClient(),
+        action_queue=queue,
+        rate_limiter=ZZapRateLimiter(interval_seconds=3.0),
+        monotonic=lambda: 10.0,
+    )
+
+    assert did_work is True
+    action = queue.pop_next(now=41.0)
+    assert action is not None
+    assert action.action_type == ZZapActionType.THREAD_FETCH
+    assert action.thread_user_key == "thread-1"
+
+
+@pytest.mark.asyncio
+async def test_periodic_cleanup_runs_only_after_daily_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup_runs: list[datetime] = []
+    settings = _FakeSettings(integration_id=uuid4())
+
+    async def fake_run_cleanup_once(*args: object, **kwargs: object) -> None:
+        cleanup_runs.append(cast(datetime, kwargs["now"]))
+
+    monkeypatch.setattr(jobs, "_run_cleanup_once", fake_run_cleanup_once)
+
+    last_cleanup_at = datetime(2026, 7, 4, 0, 0, tzinfo=UTC)
+    unchanged = await jobs.run_periodic_cleanup_if_due(
+        session_factory=cast(Any, object()),
+        settings=cast(Any, settings),
+        last_cleanup_at=last_cleanup_at,
+        now=datetime(2026, 7, 4, 23, 0, tzinfo=UTC),
+    )
+    assert unchanged == last_cleanup_at
+    assert cleanup_runs == []
+
+    due_at = datetime(2026, 7, 5, 0, 0, tzinfo=UTC)
+    updated = await jobs.run_periodic_cleanup_if_due(
+        session_factory=cast(Any, object()),
+        settings=cast(Any, settings),
+        last_cleanup_at=last_cleanup_at,
+        now=due_at,
+    )
+    assert updated == due_at
+    assert cleanup_runs == [due_at]
+
+
 class _FakeJobSession:
     def __init__(
         self,
@@ -407,3 +482,32 @@ class _FakeZZapApiClient:
         is_online: bool,
     ) -> None:
         self.calls.append("send")
+
+
+class _FakeSettings:
+    def __init__(self, *, integration_id: object) -> None:
+        self.integration_id = integration_id
+        self.successful_message_retention_days = 60
+        self.failed_record_retention_days = 30
+        self.webhook_delivery_retention_days = 30
+
+
+class _FakeThread:
+    def __init__(self, *, id: object, integration_id: object, user_key: str) -> None:
+        self.id = id
+        self.integration_id = integration_id
+        self.user_key = user_key
+        self.unread_count = 0
+
+
+class _FailingZZapClient:
+    async def list_messages(self, *args: object, **kwargs: object) -> list[object]:
+        raise RuntimeError("network failed")
+
+
+class _FakeSessionScope:
+    async def __aenter__(self) -> object:
+        return object()
+
+    async def __aexit__(self, *args: object) -> None:
+        return None

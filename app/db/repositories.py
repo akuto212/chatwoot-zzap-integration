@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID
 
-from sqlalchemy import Select, select, update
+from sqlalchemy import Select, and_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -389,18 +389,65 @@ async def reset_stale_processing_jobs(
 ) -> int:
     current_time = now or utcnow()
     cutoff = current_time - older_than
-    result = await session.execute(
+    exhausted_filter = or_(
+        and_(
+            SyncJob.job_type == JobType.INBOUND_ZZAP_MESSAGE_TO_CHATWOOT,
+            SyncJob.attempt_count >= 5,
+        ),
+        and_(
+            SyncJob.job_type.in_(
+                [
+                    JobType.OUTBOUND_CHATWOOT_MESSAGE_TO_ZZAP,
+                    JobType.CHATWOOT_PRIVATE_NOTE,
+                ],
+            ),
+            SyncJob.attempt_count >= 3,
+        ),
+    )
+    stale_filter = and_(
+        SyncJob.status == JobStatus.PROCESSING,
+        SyncJob.locked_at < cutoff,
+    )
+    exhausted_result = await session.execute(
+        update(SyncJob)
+        .where(stale_filter, exhausted_filter)
+        .values(
+            status=JobStatus.FAILED,
+            locked_at=None,
+            locked_by=None,
+            next_attempt_at=None,
+            last_error="stale processing job exhausted attempts",
+        )
+        .execution_options(synchronize_session=False),
+    )
+    pending_result = await session.execute(
         update(SyncJob)
         .where(
-            SyncJob.status == JobStatus.PROCESSING,
-            SyncJob.locked_at < cutoff,
+            stale_filter,
+            or_(
+                and_(
+                    SyncJob.job_type == JobType.INBOUND_ZZAP_MESSAGE_TO_CHATWOOT,
+                    SyncJob.attempt_count < 5,
+                ),
+                and_(
+                    SyncJob.job_type.in_(
+                        [
+                            JobType.OUTBOUND_CHATWOOT_MESSAGE_TO_ZZAP,
+                            JobType.CHATWOOT_PRIVATE_NOTE,
+                        ],
+                    ),
+                    SyncJob.attempt_count < 3,
+                ),
+            ),
         )
         .values(
             status=JobStatus.PENDING,
             locked_at=None,
             locked_by=None,
+            next_attempt_at=None,
         )
         .execution_options(synchronize_session=False),
     )
-    cursor_result = cast(CursorResult[object], result)
-    return cursor_result.rowcount or 0
+    exhausted_cursor_result = cast(CursorResult[object], exhausted_result)
+    pending_cursor_result = cast(CursorResult[object], pending_result)
+    return (exhausted_cursor_result.rowcount or 0) + (pending_cursor_result.rowcount or 0)

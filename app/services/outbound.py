@@ -80,7 +80,7 @@ async def persist_outbound_webhook_event(
         chatwoot_conversation_id=chatwoot_conversation_id,
     )
     if conversation_mapping is None:
-        raise OutboundPersistenceError("chatwoot conversation mapping was not found")
+        return False
 
     job = await create_outbound_sync_job(
         session,
@@ -120,7 +120,10 @@ class OutboundProcessor:
         uploaded_file_urls = list(_uploaded_file_urls(payload))
         attachments = _attachment_payloads(payload.get("attachments"))
         for attachment in attachments[len(uploaded_file_urls) :]:
-            body = await self.chatwoot_client.download_attachment(attachment["data_url"])
+            body = await self.chatwoot_client.download_attachment(
+                attachment["data_url"],
+                max_bytes=self.max_attachment_bytes,
+            )
             ensure_attachment_size(len(body), self.max_attachment_bytes)
             file_url = await self.zzap_client.upload_file(
                 file_name=attachment["file_name"],

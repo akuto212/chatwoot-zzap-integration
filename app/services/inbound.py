@@ -34,17 +34,19 @@ def should_import_zzap_message(
     message_date: datetime,
     cursor_message_date: datetime | None,
     fingerprint: str,
+    message_hash: str,
     known_fingerprints: set[str],
     cursor_guard_fingerprint: str | None,
 ) -> bool:
     if fingerprint in known_fingerprints:
         return False
+    is_cursor_guard = cursor_guard_fingerprint in {fingerprint, message_hash}
     if cursor_message_date is None:
-        return fingerprint != cursor_guard_fingerprint
+        return not is_cursor_guard
     if message_date > cursor_message_date:
         return True
     if message_date == cursor_message_date:
-        return fingerprint != cursor_guard_fingerprint
+        return not is_cursor_guard
     return False
 
 
@@ -66,7 +68,7 @@ class InboundProcessor:
         payload = job.payload
         zzap_user_key = _required_payload_string(payload, "zzap_user_key")
         content = _required_payload_string(payload, "message")
-        user_name = str(payload.get("zzap_user_name") or zzap_user_key)
+        user_name = _display_name(payload.get("zzap_user_name"), zzap_user_key)
 
         contact = await self._get_or_create_contact(session, zzap_user_key, user_name)
         conversation = await self._get_or_create_conversation(session, job, contact)
@@ -126,7 +128,7 @@ class InboundProcessor:
         chatwoot_contact = await self.chatwoot_client.create_contact(
             inbox_id=self.inbox_id,
             name=user_name,
-            custom_attributes={"zzap_user_key": zzap_user_key},
+            custom_attributes={"source": "zzap", "zzap_user_key": zzap_user_key},
         )
         return await create_chatwoot_contact_mapping(
             session,
@@ -174,3 +176,9 @@ def _required_payload_string(payload: dict[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value:
         raise InboundProcessingError(f"inbound job payload is missing {key}")
     return value
+
+
+def _display_name(value: object, zzap_user_key: str) -> str:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return f"ZZap {zzap_user_key[:8]}"

@@ -94,26 +94,39 @@ class ChatwootClient:
         )
         return _required_int(payload, "id")
 
-    async def download_attachment(self, url: str) -> bytes:
+    async def download_attachment(self, url: str, *, max_bytes: int | None = None) -> bytes:
         current_url = self._attachment_url(url)
         for _ in range(5):
-            response = await self._http.get(
+            async with self._http.stream(
+                "GET",
                 current_url,
                 headers=self._attachment_headers(current_url),
                 follow_redirects=False,
-            )
-            if response.status_code in {301, 302, 303, 307, 308}:
-                location = response.headers.get("location")
-                if not location:
+            ) as response:
+                if response.status_code in {301, 302, 303, 307, 308}:
+                    location = response.headers.get("location")
+                    if not location:
+                        raise ChatwootApiError(
+                            response.status_code,
+                            "attachment redirect missing location",
+                        )
+                    current_url = self._attachment_url(location, base_url=current_url)
+                    continue
+                if response.status_code >= 400:
+                    error_body = await response.aread()
                     raise ChatwootApiError(
                         response.status_code,
-                        "attachment redirect missing location",
+                        error_body.decode(errors="replace"),
                     )
-                current_url = self._attachment_url(location, base_url=current_url)
-                continue
-            if response.status_code >= 400:
-                raise ChatwootApiError(response.status_code, response.text)
-            return response.content
+                _ensure_content_length_allowed(response, max_bytes)
+                chunks: list[bytes] = []
+                downloaded = 0
+                async for chunk in response.aiter_bytes():
+                    downloaded += len(chunk)
+                    if max_bytes is not None and downloaded > max_bytes:
+                        raise ChatwootApiError(413, "attachment exceeds maximum size")
+                    chunks.append(chunk)
+                return b"".join(chunks)
         raise ChatwootApiError(0, "attachment redirect limit exceeded")
 
     async def _request_json(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
@@ -195,6 +208,20 @@ def _source_id_for_inbox(contact: dict[str, Any], *, inbox_id: int) -> str | Non
         except (TypeError, ValueError):
             continue
     return None
+
+
+def _ensure_content_length_allowed(response: httpx.Response, max_bytes: int | None) -> None:
+    if max_bytes is None:
+        return
+    content_length = response.headers.get("content-length")
+    if not content_length:
+        return
+    try:
+        size = int(content_length)
+    except ValueError:
+        return
+    if size > max_bytes:
+        raise ChatwootApiError(413, "attachment exceeds maximum size")
 
 
 def _required_int(payload: dict[str, Any], key: str, *, fallback: Any = None) -> int:

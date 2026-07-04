@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 import httpx
 import pytest
 
@@ -191,6 +193,30 @@ async def test_chatwoot_client_redirects_attachment_without_leaking_auth() -> No
 
 
 @pytest.mark.asyncio
+async def test_chatwoot_client_rejects_oversized_attachment_before_reading_body() -> None:
+    stream = _ExplodingStream()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-length": "11"},
+            stream=stream,
+        )
+
+    client = ChatwootClient(
+        base_url="https://chatwoot.example.test",
+        account_id=1,
+        api_token="token",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(ChatwootApiError, match="attachment exceeds maximum size"):
+        await client.download_attachment("https://storage.example.test/file.png", max_bytes=10)
+
+    assert stream.read_attempted is False
+
+
+@pytest.mark.asyncio
 async def test_chatwoot_client_wraps_invalid_json_response() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"not-json")
@@ -204,3 +230,13 @@ async def test_chatwoot_client_wraps_invalid_json_response() -> None:
 
     with pytest.raises(ChatwootApiError):
         await client.create_private_note(conversation_id=2, content="failed")
+
+
+class _ExplodingStream(httpx.AsyncByteStream):
+    def __init__(self) -> None:
+        self.read_attempted = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        self.read_attempted = True
+        raise AssertionError("body should not be read")
+        yield b""

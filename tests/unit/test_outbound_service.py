@@ -19,7 +19,6 @@ from app.db.models import (
 )
 from app.services import outbound
 from app.services.outbound import (
-    OutboundPersistenceError,
     OutboundProcessor,
     build_zzap_outbound_message,
     persist_outbound_webhook_event,
@@ -194,7 +193,7 @@ async def test_persist_outbound_webhook_event_returns_false_for_duplicate_outbou
 
 
 @pytest.mark.asyncio
-async def test_persist_outbound_webhook_event_raises_without_conversation_mapping(
+async def test_persist_outbound_webhook_event_ignores_unknown_conversation_mapping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     integration_id = uuid4()
@@ -209,13 +208,15 @@ async def test_persist_outbound_webhook_event_raises_without_conversation_mappin
     monkeypatch.setattr(outbound, "has_chatwoot_message_mapping", fake_has_message_mapping)
     monkeypatch.setattr(outbound, "get_chatwoot_conversation_by_chatwoot_id", fake_get_conversation)
 
-    with pytest.raises(OutboundPersistenceError):
-        await persist_outbound_webhook_event(
-            cast(AsyncSession, session),
-            payload={"id": 10, "conversation": {"id": 20}},
-            delivery_id=None,
-            integration_id=integration_id,
-        )
+    created = await persist_outbound_webhook_event(
+        cast(AsyncSession, session),
+        payload={"id": 10, "conversation": {"id": 20}},
+        delivery_id=None,
+        integration_id=integration_id,
+    )
+
+    assert created is False
+    assert session.jobs == []
 
 
 @pytest.mark.asyncio
@@ -377,8 +378,10 @@ class _FakeSession:
 class _FakeChatwootClient:
     def __init__(self, *, downloads: dict[str, bytes] | None = None) -> None:
         self.downloads = downloads or {}
+        self.download_limits: list[int] = []
 
-    async def download_attachment(self, url: str) -> bytes:
+    async def download_attachment(self, url: str, *, max_bytes: int) -> bytes:
+        self.download_limits.append(max_bytes)
         return self.downloads[url]
 
 
