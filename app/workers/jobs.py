@@ -628,6 +628,10 @@ async def _persist_thread_messages(
         integration_id=settings.integration_id,
         fingerprints={item.fingerprint.fingerprint for item in message_items},
     )
+    bootstrap_fallback_fingerprints = _bootstrap_fallback_fingerprints(
+        thread=thread,
+        message_items=message_items,
+    )
 
     for item in message_items:
         if not should_import_zzap_message(
@@ -639,7 +643,11 @@ async def _persist_thread_messages(
             message_hash=item.fingerprint.message_hash,
         ):
             continue
-        if thread.cursor_message_date is None and item.unread is not True:
+        if not _should_import_bootstrap_item(
+            thread=thread,
+            item=item,
+            bootstrap_fallback_fingerprints=bootstrap_fallback_fingerprints,
+        ):
             continue
         await persist_inbound_message_job(
             session,
@@ -656,6 +664,34 @@ async def _persist_thread_messages(
             },
         )
         known_fingerprints.add(item.fingerprint.fingerprint)
+
+
+def _bootstrap_fallback_fingerprints(
+    *,
+    thread: ZZapThread,
+    message_items: list[_MessageItem],
+) -> set[str]:
+    if thread.cursor_message_date is not None or thread.unread_count <= 0:
+        return set()
+    if any(item.unread is True for item in message_items):
+        return set()
+    return {
+        item.fingerprint.fingerprint
+        for item in message_items[-thread.unread_count :]
+    }
+
+
+def _should_import_bootstrap_item(
+    *,
+    thread: ZZapThread,
+    item: _MessageItem,
+    bootstrap_fallback_fingerprints: set[str],
+) -> bool:
+    if thread.cursor_message_date is not None:
+        return True
+    if item.unread is True:
+        return True
+    return item.fingerprint.fingerprint in bootstrap_fallback_fingerprints
 
 
 async def _get_thread_by_user_key(
