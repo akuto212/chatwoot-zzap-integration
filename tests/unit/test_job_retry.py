@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.clients.zzap import ZZapMessageDto
 from app.db.models import (
     JobStatus,
     JobType,
@@ -15,6 +16,7 @@ from app.db.models import (
     MessageMapping,
     MessageStatus,
     SyncJob,
+    ZZapThread,
 )
 from app.workers import jobs
 from app.workers.cleanup import cleanup_old_records
@@ -381,6 +383,56 @@ async def test_zzap_polling_limiter_waits_after_request_finishes(
 
 
 @pytest.mark.asyncio
+async def test_unread_bootstrap_imports_messages_without_per_message_unread_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    integration_id = uuid4()
+    thread = ZZapThread(
+        id=uuid4(),
+        integration_id=integration_id,
+        user_key="thread-1",
+        user_name="Alice",
+        unread_count=1,
+    )
+    persisted_payloads: list[dict[str, object]] = []
+
+    async def fake_persist_inbound_message_job(*args: object, **kwargs: object) -> None:
+        persisted_payloads.append(cast(dict[str, object], kwargs["payload"]))
+
+    monkeypatch.setattr(jobs, "persist_inbound_message_job", fake_persist_inbound_message_job)
+
+    await jobs._persist_thread_messages(
+        cast(AsyncSession, _FakeKnownFingerprintSession()),
+        settings=cast(Any, _FakeSettings(integration_id=integration_id)),
+        thread=thread,
+        messages=[
+            ZZapMessageDto(
+                user_key="sender-1",
+                user_name="Alice",
+                message_date="2026-07-04T15:43:50",
+                message="old message",
+                unread=None,
+            ),
+            ZZapMessageDto(
+                user_key="sender-1",
+                user_name="Alice",
+                message_date="2026-07-04T15:44:50",
+                message="test message",
+                unread=None,
+            ),
+        ],
+    )
+
+    assert persisted_payloads == [
+        {
+            "zzap_user_key": "thread-1",
+            "zzap_user_name": "Alice",
+            "message": "test message",
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_failed_thread_fetch_is_requeued_after_zzap_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -587,3 +639,13 @@ class _FakeSessionScope:
 
     async def __aexit__(self, *args: object) -> None:
         return None
+
+
+class _EmptyKnownFingerprintResult:
+    def all(self) -> list[object]:
+        return []
+
+
+class _FakeKnownFingerprintSession:
+    async def execute(self, statement: object) -> _EmptyKnownFingerprintResult:
+        return _EmptyKnownFingerprintResult()
