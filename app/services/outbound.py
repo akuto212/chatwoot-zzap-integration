@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
+from urllib.parse import unquote, urlparse
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -230,9 +231,44 @@ def _attachment_payloads(value: object) -> list[dict[str, str]]:
         url = item.get("data_url") or item.get("download_url")
         if not isinstance(url, str) or not url:
             raise OutboundPersistenceError("attachment item is missing data_url")
-        file_name = item.get("file_name") or item.get("filename") or f"attachment-{index + 1}"
+        file_name = _attachment_file_name(item, url=url, index=index)
         attachments.append({"data_url": url, "file_name": str(file_name)})
     return attachments
+
+
+def _attachment_file_name(item: dict[str, Any], *, url: str, index: int) -> str:
+    explicit_name = item.get("file_name") or item.get("filename")
+    url_name = _file_name_from_url(url)
+    if isinstance(explicit_name, str) and explicit_name.strip():
+        stripped_name = explicit_name.strip()
+        if _has_file_extension(stripped_name) or not url_name:
+            return stripped_name
+        return f"{stripped_name}{_file_extension(url_name)}"
+    return url_name or f"attachment-{index + 1}"
+
+
+def _file_name_from_url(url: str) -> str | None:
+    parsed_path = urlparse(url).path.rstrip("/")
+    if not parsed_path:
+        return None
+    file_name = unquote(parsed_path.rsplit("/", 1)[-1]).strip()
+    if not file_name or not _has_file_extension(file_name):
+        return None
+    return file_name
+
+
+def _has_file_extension(file_name: str) -> bool:
+    return bool(_file_extension(file_name))
+
+
+def _file_extension(file_name: str) -> str:
+    basename = file_name.rsplit("/", 1)[-1]
+    if "." not in basename:
+        return ""
+    stem, extension = basename.rsplit(".", 1)
+    if not stem or not extension:
+        return ""
+    return f".{extension}"
 
 
 def _uploaded_file_urls(payload: dict[str, Any]) -> list[str]:

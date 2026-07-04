@@ -128,9 +128,71 @@ async def test_persist_outbound_webhook_event_creates_job(monkeypatch: pytest.Mo
     assert session.jobs[0].zzap_thread_id == conversation.zzap_thread_id
     assert session.jobs[0].payload["content"] == "hello"
     assert session.jobs[0].payload["attachments"] == [
-        {"data_url": "https://chatwoot.test/a.png", "file_name": "attachment-1"},
+        {"data_url": "https://chatwoot.test/a.png", "file_name": "a.png"},
     ]
     assert session.deliveries == ["delivery-1"]
+
+
+@pytest.mark.asyncio
+async def test_persist_outbound_webhook_event_uses_active_storage_url_extension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    integration_id = uuid4()
+    payload = {
+        "id": 10,
+        "content": "",
+        "conversation": {"id": 20},
+        "attachments": [
+            {
+                "data_url": (
+                    "https://chat.gt-shop.ru/rails/active_storage/blobs/redirect/token/b58.webp"
+                ),
+            },
+        ],
+    }
+    conversation = ChatwootConversation(
+        integration_id=integration_id,
+        zzap_thread_id=uuid4(),
+        chatwoot_contact_id=uuid4(),
+        chatwoot_conversation_id=20,
+    )
+    session = _FakeSession()
+
+    async def fake_has_message_mapping(*args: object, **kwargs: object) -> bool:
+        return False
+
+    async def fake_get_conversation(*args: object, **kwargs: object) -> ChatwootConversation:
+        return conversation
+
+    async def fake_create_outbound_job(*args: object, **kwargs: Any) -> SyncJob:
+        job = SyncJob(
+            integration_id=kwargs["integration_id"],
+            job_type=JobType.OUTBOUND_CHATWOOT_MESSAGE_TO_ZZAP,
+            status=JobStatus.PENDING,
+            zzap_thread_id=kwargs["zzap_thread_id"],
+            payload=kwargs["payload"],
+        )
+        session.add(job)
+        return job
+
+    monkeypatch.setattr(outbound, "has_chatwoot_message_mapping", fake_has_message_mapping)
+    monkeypatch.setattr(outbound, "get_chatwoot_conversation_by_chatwoot_id", fake_get_conversation)
+    monkeypatch.setattr(outbound, "create_outbound_sync_job", fake_create_outbound_job)
+
+    created = await persist_outbound_webhook_event(
+        cast(AsyncSession, session),
+        payload=payload,
+        delivery_id=None,
+        integration_id=integration_id,
+    )
+
+    assert created is True
+    assert session.jobs[0].payload["attachments"] == [
+        {
+            "data_url": "https://chat.gt-shop.ru/rails/active_storage/blobs/redirect/token/b58.webp",
+            "file_name": "b58.webp",
+        },
+    ]
 
 
 @pytest.mark.asyncio
