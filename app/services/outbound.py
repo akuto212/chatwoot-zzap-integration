@@ -11,10 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import JobStatus, JobType, SyncJob
 from app.db.repositories import (
+    create_outbound_sync_job,
     get_chatwoot_conversation_by_chatwoot_id,
     get_zzap_thread_by_id,
     has_chatwoot_message_mapping,
-    has_outbound_sync_job,
     record_webhook_delivery,
 )
 from app.services.attachments import ensure_attachment_size
@@ -73,12 +73,6 @@ async def persist_outbound_webhook_event(
         chatwoot_message_id=chatwoot_message_id,
     ):
         return False
-    if await has_outbound_sync_job(
-        session,
-        integration_id=integration_id,
-        chatwoot_message_id=chatwoot_message_id,
-    ):
-        return False
 
     conversation_mapping = await get_chatwoot_conversation_by_chatwoot_id(
         session,
@@ -88,10 +82,9 @@ async def persist_outbound_webhook_event(
     if conversation_mapping is None:
         raise OutboundPersistenceError("chatwoot conversation mapping was not found")
 
-    job = SyncJob(
+    job = await create_outbound_sync_job(
+        session,
         integration_id=integration_id,
-        job_type=JobType.OUTBOUND_CHATWOOT_MESSAGE_TO_ZZAP,
-        status=JobStatus.PENDING,
         zzap_thread_id=conversation_mapping.zzap_thread_id,
         chatwoot_conversation_id=chatwoot_conversation_id,
         chatwoot_message_id=chatwoot_message_id,
@@ -101,9 +94,7 @@ async def persist_outbound_webhook_event(
             "attachments": _attachment_payloads(payload.get("attachments")),
         },
     )
-    session.add(job)
-    await session.flush()
-    return True
+    return job is not None
 
 
 @dataclass(frozen=True)
@@ -125,7 +116,7 @@ class OutboundProcessor:
             await session.flush()
             return
 
-        payload = job.payload
+        payload = dict(job.payload)
         uploaded_file_urls = list(_uploaded_file_urls(payload))
         attachments = _attachment_payloads(payload.get("attachments"))
         for attachment in attachments[len(uploaded_file_urls) :]:
@@ -136,7 +127,8 @@ class OutboundProcessor:
                 file_body_base64=b64encode(body).decode("ascii"),
             )
             uploaded_file_urls.append(file_url)
-            payload["uploaded_file_urls"] = uploaded_file_urls
+            payload = payload | {"uploaded_file_urls": uploaded_file_urls}
+            job.payload = payload
             await session.flush()
 
         content = str(payload.get("content") or "")

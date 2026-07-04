@@ -296,20 +296,41 @@ async def has_chatwoot_message_mapping(
     return result.scalar_one_or_none() is not None
 
 
-async def has_outbound_sync_job(
+async def create_outbound_sync_job(
     session: AsyncSession,
     *,
     integration_id: UUID,
+    zzap_thread_id: UUID,
+    chatwoot_conversation_id: int,
     chatwoot_message_id: int,
-) -> bool:
-    result = await session.execute(
-        select(SyncJob.id).where(
-            SyncJob.integration_id == integration_id,
-            SyncJob.chatwoot_message_id == chatwoot_message_id,
-            SyncJob.job_type == JobType.OUTBOUND_CHATWOOT_MESSAGE_TO_ZZAP,
-        ),
+    payload: dict[str, object],
+) -> SyncJob | None:
+    statement = (
+        pg_insert(SyncJob)
+        .values(
+            integration_id=integration_id,
+            job_type=JobType.OUTBOUND_CHATWOOT_MESSAGE_TO_ZZAP,
+            status=JobStatus.PENDING,
+            zzap_thread_id=zzap_thread_id,
+            chatwoot_conversation_id=chatwoot_conversation_id,
+            chatwoot_message_id=chatwoot_message_id,
+            payload=payload,
+        )
+        .on_conflict_do_nothing(
+            index_elements=["integration_id", "chatwoot_message_id", "job_type"],
+            index_where=SyncJob.chatwoot_message_id.is_not(None),
+        )
+        .returning(SyncJob.id)
     )
-    return result.scalar_one_or_none() is not None
+    result = await session.execute(statement)
+    job_id = result.scalar_one_or_none()
+    if job_id is None:
+        return None
+
+    job = await session.get(SyncJob, job_id)
+    if job is None:
+        raise RuntimeError("failed to load inserted outbound sync job")
+    return job
 
 
 async def record_webhook_delivery(

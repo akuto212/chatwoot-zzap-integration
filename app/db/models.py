@@ -205,10 +205,12 @@ class SyncJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "sync_jobs"
     __table_args__ = (
         Index(
-            "ix_sync_jobs_chatwoot_message",
+            "uq_sync_jobs_chatwoot_message_job_type",
             "integration_id",
             "chatwoot_message_id",
             "job_type",
+            unique=True,
+            postgresql_where=text("chatwoot_message_id IS NOT NULL"),
         ),
     )
 
