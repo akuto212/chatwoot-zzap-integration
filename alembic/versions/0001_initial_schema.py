@@ -18,22 +18,29 @@ down_revision = None
 branch_labels = None
 depends_on = None
 
-message_direction = sa.Enum("inbound", "outbound", name="message_direction")
-message_status = sa.Enum(
+message_direction = postgresql.ENUM(
+    "inbound",
+    "outbound",
+    name="message_direction",
+    create_type=False,
+)
+message_status = postgresql.ENUM(
     "pending",
     "succeeded",
     "failed",
     "ignored",
     "blocked",
     name="message_status",
+    create_type=False,
 )
-job_type = sa.Enum(
+job_type = postgresql.ENUM(
     "inbound_zzap_message_to_chatwoot",
     "outbound_chatwoot_message_to_zzap",
     "chatwoot_private_note",
     name="job_type",
+    create_type=False,
 )
-job_status = sa.Enum(
+job_status = postgresql.ENUM(
     "pending",
     "processing",
     "succeeded",
@@ -41,6 +48,7 @@ job_status = sa.Enum(
     "ignored",
     "blocked",
     name="job_status",
+    create_type=False,
 )
 
 
