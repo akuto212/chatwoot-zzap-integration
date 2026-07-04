@@ -168,6 +168,7 @@ async def run_worker_loop(settings: Settings) -> None:
                 chatwoot_client=chatwoot_client,
                 inbox_id=settings.chatwoot_inbox_id,
                 integration_id=settings.integration_id,
+                max_attachment_bytes=settings.max_attachment_bytes,
             )
             outbound_processor = OutboundProcessor(
                 chatwoot_client=chatwoot_client,
