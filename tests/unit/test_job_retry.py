@@ -7,8 +7,9 @@ import pytest
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.models import JobStatus, JobType, SyncJob
 from app.workers.cleanup import cleanup_old_records
-from app.workers.jobs import retry_delay_for_attempt
+from app.workers.jobs import process_claimed_job, retry_delay_for_attempt
 from app.workers.locks import (
     ADVISORY_LOCK_KEY,
     release_worker_advisory_lock,
@@ -142,3 +143,152 @@ class _FakeCleanupSession:
 class _CompilableStatement(Protocol):
     def compile(self, *args: Any, **kwargs: Any) -> object:
         pass
+
+
+@pytest.mark.asyncio
+async def test_process_claimed_job_marks_success_and_clears_lock() -> None:
+    job = SyncJob(
+        integration_id="11111111-1111-4111-8111-111111111111",
+        job_type=JobType.INBOUND_ZZAP_MESSAGE_TO_CHATWOOT,
+        status=JobStatus.PROCESSING,
+        attempt_count=1,
+        locked_by="worker-1",
+        locked_at=datetime(2026, 7, 4, tzinfo=UTC),
+        payload={"message": "hello"},
+    )
+    session = _FakeJobSession()
+    processor = _FakeProcessor()
+
+    await process_claimed_job(
+        cast(AsyncSession, session),
+        job=job,
+        inbound_processor=processor,
+        outbound_processor=_FakeProcessor(),
+        chatwoot_client=_FakeChatwootClient(),
+        now=datetime(2026, 7, 4, tzinfo=UTC),
+    )
+
+    assert processor.processed_jobs == [job]
+    assert job.status == JobStatus.SUCCEEDED
+    assert job.payload == {}
+    assert job.locked_by is None
+    assert job.locked_at is None
+    assert job.next_attempt_at is None
+    assert session.flush_count == 1
+
+
+@pytest.mark.asyncio
+async def test_process_claimed_job_retries_inside_transaction_and_preserves_payload() -> None:
+    job = SyncJob(
+        integration_id="11111111-1111-4111-8111-111111111111",
+        job_type=JobType.OUTBOUND_CHATWOOT_MESSAGE_TO_ZZAP,
+        status=JobStatus.PROCESSING,
+        attempt_count=1,
+        locked_by="worker-1",
+        locked_at=datetime(2026, 7, 4, tzinfo=UTC),
+        payload={"content": "hello"},
+    )
+    session = _FakeJobSession()
+    processor = _FakeProcessor(
+        error=RuntimeError("send failed"),
+        payload_update={"content": "hello", "uploaded_file_urls": ["https://zzap.test/a.txt"]},
+    )
+    now = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+
+    await process_claimed_job(
+        cast(AsyncSession, session),
+        job=job,
+        inbound_processor=_FakeProcessor(),
+        outbound_processor=processor,
+        chatwoot_client=_FakeChatwootClient(),
+        now=now,
+    )
+
+    assert job.status == JobStatus.PENDING
+    assert job.next_attempt_at == now + timedelta(minutes=1)
+    assert job.payload == {
+        "content": "hello",
+        "uploaded_file_urls": ["https://zzap.test/a.txt"],
+    }
+    assert job.last_error == "send failed"
+    assert job.locked_by is None
+    assert job.locked_at is None
+    assert session.flush_count == 2
+
+
+@pytest.mark.asyncio
+async def test_process_claimed_job_exhausts_outbound_and_creates_private_note() -> None:
+    job = SyncJob(
+        integration_id="11111111-1111-4111-8111-111111111111",
+        job_type=JobType.OUTBOUND_CHATWOOT_MESSAGE_TO_ZZAP,
+        status=JobStatus.PROCESSING,
+        attempt_count=4,
+        locked_by="worker-1",
+        locked_at=datetime(2026, 7, 4, tzinfo=UTC),
+        chatwoot_conversation_id=20,
+        payload={
+            "content": "hello",
+            "uploaded_file_urls": ["https://zzap.test/a.txt"],
+        },
+    )
+    session = _FakeJobSession()
+
+    await process_claimed_job(
+        cast(AsyncSession, session),
+        job=job,
+        inbound_processor=_FakeProcessor(),
+        outbound_processor=_FakeProcessor(error=RuntimeError("send failed")),
+        chatwoot_client=_FakeChatwootClient(),
+        now=datetime(2026, 7, 4, tzinfo=UTC),
+    )
+
+    assert job.status == JobStatus.FAILED
+    assert job.next_attempt_at is None
+    assert job.locked_by is None
+    assert job.locked_at is None
+    assert session.added_jobs[0].job_type == JobType.CHATWOOT_PRIVATE_NOTE
+    assert session.added_jobs[0].chatwoot_conversation_id == 20
+    assert "send failed" in session.added_jobs[0].payload["content"]
+    assert "https://zzap.test/a.txt" not in session.added_jobs[0].payload["content"]
+
+
+class _FakeJobSession:
+    def __init__(self) -> None:
+        self.flush_count = 0
+        self.added_jobs: list[SyncJob] = []
+
+    def add(self, instance: object) -> None:
+        if isinstance(instance, SyncJob):
+            self.added_jobs.append(instance)
+
+    async def flush(self) -> None:
+        self.flush_count += 1
+
+
+class _FakeProcessor:
+    def __init__(
+        self,
+        *,
+        error: Exception | None = None,
+        payload_update: dict[str, object] | None = None,
+    ) -> None:
+        self.error = error
+        self.payload_update = payload_update
+        self.processed_jobs: list[SyncJob] = []
+
+    async def process_job(self, session: AsyncSession, job: SyncJob) -> None:
+        self.processed_jobs.append(job)
+        if self.payload_update is not None:
+            job.payload = self.payload_update
+            await session.flush()
+        if self.error is not None:
+            raise self.error
+
+
+class _FakeChatwootClient:
+    def __init__(self) -> None:
+        self.private_notes: list[tuple[int, str]] = []
+
+    async def create_private_note(self, *, conversation_id: int, content: str) -> int:
+        self.private_notes.append((conversation_id, content))
+        return 10

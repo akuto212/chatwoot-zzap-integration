@@ -18,3 +18,16 @@ def test_thread_fetch_is_coalesced_per_thread() -> None:
     queue.enqueue_thread_fetch("b")
 
     assert queue.size() == 2
+
+
+def test_summary_poll_is_scheduled_when_due() -> None:
+    queue = ZZapActionQueue()
+
+    assert queue.enqueue_summary_poll_if_due(now=10.0, interval_seconds=3.0)
+    assert not queue.enqueue_summary_poll_if_due(now=11.0, interval_seconds=3.0)
+    assert queue.size() == 1
+
+    queue.pop_next()
+
+    assert queue.enqueue_summary_poll_if_due(now=13.0, interval_seconds=3.0)
+    assert queue.size() == 1

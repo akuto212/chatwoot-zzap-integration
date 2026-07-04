@@ -4,6 +4,7 @@ import time
 from typing import Any
 
 from litestar import Controller, Request, Response, post
+from litestar.di import NamedDependency
 from litestar.exceptions import HTTPException
 from litestar.status_codes import HTTP_200_OK, HTTP_403_FORBIDDEN, HTTP_500_INTERNAL_SERVER_ERROR
 
@@ -21,7 +22,11 @@ class ChatwootWebhookController(Controller):
     path = "/webhooks/chatwoot"
 
     @post()
-    async def receive(self, request: Request, settings: Settings) -> Response[dict[str, str]]:
+    async def receive(
+        self,
+        request: Request,
+        settings: NamedDependency[Settings],
+    ) -> Response[dict[str, str]]:
         raw_body = await request.body()
         try:
             verify_chatwoot_signature(

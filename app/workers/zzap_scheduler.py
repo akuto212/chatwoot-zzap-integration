@@ -21,12 +21,24 @@ class ZZapActionQueue:
         self._queue: deque[ZZapAction] = deque()
         self._pending_summary = False
         self._pending_thread_fetches: set[str] = set()
+        self._last_summary_scheduled_at: float | None = None
 
     def enqueue_summary_poll(self) -> None:
         if self._pending_summary:
             return
         self._pending_summary = True
         self._queue.append(ZZapAction(ZZapActionType.SUMMARY_POLL))
+
+    def enqueue_summary_poll_if_due(self, *, now: float, interval_seconds: float) -> bool:
+        if self._last_summary_scheduled_at is not None:
+            if now - self._last_summary_scheduled_at < interval_seconds:
+                return False
+        previous_size = self.size()
+        self.enqueue_summary_poll()
+        if self.size() == previous_size:
+            return False
+        self._last_summary_scheduled_at = now
+        return True
 
     def enqueue_thread_fetch(self, thread_user_key: str) -> None:
         if thread_user_key in self._pending_thread_fetches:
