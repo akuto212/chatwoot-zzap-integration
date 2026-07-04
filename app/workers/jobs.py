@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -17,6 +18,7 @@ from app.clients.zzap import ZZapApiError, ZZapClient, ZZapMessageDto, ZZapThrea
 from app.db.models import (
     JobStatus,
     JobType,
+    MessageDirection,
     MessageMapping,
     MessageStatus,
     ServiceState,
@@ -55,6 +57,14 @@ INBOUND_RETRY_DELAYS = [
 MAX_OUTBOUND_ATTEMPTS = 3
 MAX_INBOUND_ATTEMPTS = 5
 CLEANUP_INTERVAL = timedelta(days=1)
+OUTBOUND_ECHO_TOLERANCE = timedelta(minutes=2)
+
+
+@dataclass(frozen=True)
+class OutboundEchoGuard:
+    message_hash: str
+    zzap_message_date: datetime | None
+    created_at: datetime | None
 
 
 def retry_delay_for_attempt(*, direction: str, attempt_count: int) -> timedelta | None:
@@ -628,6 +638,12 @@ async def _persist_thread_messages(
         integration_id=settings.integration_id,
         fingerprints={item.fingerprint.fingerprint for item in message_items},
     )
+    outbound_echo_guards = await _known_outbound_echo_guards(
+        session,
+        integration_id=settings.integration_id,
+        thread_id=thread.id,
+        message_hashes={item.fingerprint.message_hash for item in message_items},
+    )
     bootstrap_fallback_fingerprints = _bootstrap_fallback_fingerprints(
         thread=thread,
         message_items=message_items,
@@ -642,6 +658,8 @@ async def _persist_thread_messages(
             cursor_guard_fingerprint=thread.cursor_guard_fingerprint,
             message_hash=item.fingerprint.message_hash,
         ):
+            continue
+        if _is_outbound_echo(item, outbound_echo_guards):
             continue
         if not _should_import_bootstrap_item(
             thread=thread,
@@ -692,6 +710,23 @@ def _should_import_bootstrap_item(
     if item.unread is True:
         return True
     return item.fingerprint.fingerprint in bootstrap_fallback_fingerprints
+
+
+def _is_outbound_echo(item: _MessageItem, guards: list[OutboundEchoGuard]) -> bool:
+    for guard in guards:
+        if item.fingerprint.message_hash != guard.message_hash:
+            continue
+        if _within_outbound_echo_tolerance(item.message_date, guard.zzap_message_date):
+            return True
+        if _within_outbound_echo_tolerance(item.message_date, guard.created_at):
+            return True
+    return False
+
+
+def _within_outbound_echo_tolerance(left: datetime, right: datetime | None) -> bool:
+    if right is None:
+        return False
+    return abs(left - right) <= OUTBOUND_ECHO_TOLERANCE
 
 
 async def _get_thread_by_user_key(
@@ -792,6 +827,38 @@ async def _known_fingerprints(
         ),
     )
     return {str(row[0]) for row in result.all()}
+
+
+async def _known_outbound_echo_guards(
+    session: AsyncSession,
+    *,
+    integration_id: Any,
+    thread_id: Any,
+    message_hashes: set[str],
+) -> list[OutboundEchoGuard]:
+    if not message_hashes:
+        return []
+    result = await session.execute(
+        select(
+            MessageMapping.message_hash,
+            MessageMapping.zzap_message_date,
+            MessageMapping.created_at,
+        ).where(
+            MessageMapping.integration_id == integration_id,
+            MessageMapping.zzap_thread_id == thread_id,
+            MessageMapping.direction == MessageDirection.OUTBOUND,
+            MessageMapping.status == MessageStatus.SUCCEEDED,
+            MessageMapping.message_hash.in_(message_hashes),
+        ),
+    )
+    return [
+        OutboundEchoGuard(
+            message_hash=message_hash,
+            zzap_message_date=zzap_message_date,
+            created_at=created_at,
+        )
+        for message_hash, zzap_message_date, created_at in result.all()
+    ]
 
 
 async def _upsert_service_state(

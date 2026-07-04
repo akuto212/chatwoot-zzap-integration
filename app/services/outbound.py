@@ -15,9 +15,11 @@ from app.db.repositories import (
     get_chatwoot_conversation_by_chatwoot_id,
     get_zzap_thread_by_id,
     has_chatwoot_message_mapping,
+    persist_outbound_message_mapping,
     record_webhook_delivery,
 )
 from app.services.attachments import ensure_attachment_size
+from app.services.fingerprinting import build_zzap_fingerprint
 
 
 class OutboundPersistenceError(RuntimeError):
@@ -135,15 +137,37 @@ class OutboundProcessor:
             await session.flush()
 
         content = str(payload.get("content") or "")
+        message_date = _message_date(payload.get("created_at"))
+        outbound_message = build_zzap_outbound_message(
+            content=content,
+            uploaded_file_urls=uploaded_file_urls,
+        )
         await self.zzap_client.send_message(
             user_key=thread.user_key,
-            message=build_zzap_outbound_message(
-                content=content,
-                uploaded_file_urls=uploaded_file_urls,
-            ),
-            message_date=_message_date(payload.get("created_at")),
+            message=outbound_message,
+            message_date=message_date,
             is_online=True,
         )
+        chatwoot_message_id = job.chatwoot_message_id
+        chatwoot_conversation_id = job.chatwoot_conversation_id
+        if chatwoot_message_id is not None and chatwoot_conversation_id is not None:
+            fingerprint = build_zzap_fingerprint(
+                integration_id=str(job.integration_id),
+                thread_user_key=thread.user_key,
+                sender_user_key=thread.user_key,
+                message_date=message_date,
+                message_text=outbound_message,
+            )
+            await persist_outbound_message_mapping(
+                session,
+                integration_id=job.integration_id,
+                thread=thread,
+                fingerprint=fingerprint.fingerprint,
+                message_hash=fingerprint.message_hash,
+                zzap_message_date=message_date,
+                chatwoot_message_id=chatwoot_message_id,
+                chatwoot_conversation_id=chatwoot_conversation_id,
+            )
         job.status = JobStatus.SUCCEEDED
         job.payload = {}
         await session.flush()

@@ -333,6 +333,36 @@ async def create_outbound_sync_job(
     return job
 
 
+async def persist_outbound_message_mapping(
+    session: AsyncSession,
+    *,
+    integration_id: UUID,
+    thread: ZZapThread,
+    fingerprint: str,
+    message_hash: str,
+    zzap_message_date: datetime,
+    chatwoot_message_id: int,
+    chatwoot_conversation_id: int,
+) -> None:
+    statement = (
+        pg_insert(MessageMapping)
+        .values(
+            integration_id=integration_id,
+            direction=MessageDirection.OUTBOUND,
+            status=MessageStatus.SUCCEEDED,
+            fingerprint=fingerprint,
+            message_hash=message_hash,
+            zzap_thread_id=thread.id,
+            zzap_sender_user_key=None,
+            zzap_message_date=zzap_message_date,
+            chatwoot_message_id=chatwoot_message_id,
+            chatwoot_conversation_id=chatwoot_conversation_id,
+        )
+        .on_conflict_do_nothing()
+    )
+    await session.execute(statement)
+
+
 async def record_webhook_delivery(
     session: AsyncSession,
     *,

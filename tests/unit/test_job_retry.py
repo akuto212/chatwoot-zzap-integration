@@ -18,6 +18,7 @@ from app.db.models import (
     SyncJob,
     ZZapThread,
 )
+from app.services.fingerprinting import sha256_hex
 from app.workers import jobs
 from app.workers.cleanup import cleanup_old_records
 from app.workers.jobs import (
@@ -430,6 +431,60 @@ async def test_unread_bootstrap_imports_messages_without_per_message_unread_flag
             "message": "test message",
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_outbound_echo_is_not_imported_as_inbound_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    integration_id = uuid4()
+    echo_date = datetime(2026, 7, 4, 16, 12, 11, tzinfo=UTC)
+    thread = ZZapThread(
+        id=uuid4(),
+        integration_id=integration_id,
+        user_key="client-thread",
+        user_name="Test client",
+        unread_count=0,
+        cursor_message_date=datetime(2026, 7, 4, 16, 10, tzinfo=UTC),
+    )
+    persisted_payloads: list[dict[str, object]] = []
+
+    async def fake_known_outbound_echo_guards(*args: object, **kwargs: object) -> list[object]:
+        return [
+            jobs.OutboundEchoGuard(
+                message_hash=sha256_hex("operator reply"),
+                zzap_message_date=echo_date,
+                created_at=echo_date,
+            ),
+        ]
+
+    async def fake_persist_inbound_message_job(*args: object, **kwargs: object) -> None:
+        persisted_payloads.append(cast(dict[str, object], kwargs["payload"]))
+
+    monkeypatch.setattr(
+        jobs,
+        "_known_outbound_echo_guards",
+        fake_known_outbound_echo_guards,
+        raising=False,
+    )
+    monkeypatch.setattr(jobs, "persist_inbound_message_job", fake_persist_inbound_message_job)
+
+    await jobs._persist_thread_messages(
+        cast(AsyncSession, _FakeKnownFingerprintSession()),
+        settings=cast(Any, _FakeSettings(integration_id=integration_id)),
+        thread=thread,
+        messages=[
+            ZZapMessageDto(
+                user_key="seller-user",
+                user_name="Operator",
+                message_date=echo_date.isoformat(),
+                message="operator reply",
+                unread=None,
+            ),
+        ],
+    )
+
+    assert persisted_payloads == []
 
 
 @pytest.mark.asyncio
