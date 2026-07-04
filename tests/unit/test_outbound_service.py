@@ -18,6 +18,7 @@ from app.db.models import (
     ZZapThread,
 )
 from app.services import outbound
+from app.services.fingerprinting import sha256_hex
 from app.services.outbound import (
     OutboundProcessor,
     build_zzap_outbound_message,
@@ -309,6 +310,67 @@ async def test_outbound_processor_sends_message_and_clears_payload(
     assert job.status == JobStatus.SUCCEEDED
     assert job.payload == {}
     assert session.flush_count == 2
+
+
+@pytest.mark.asyncio
+async def test_outbound_processor_records_successful_send_as_echo_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    integration_id = uuid4()
+    created_at = datetime.fromisoformat("2026-07-04T10:00:00+03:00")
+    thread = ZZapThread(
+        id=uuid4(),
+        integration_id=integration_id,
+        user_key="zzap-user",
+        read_only=False,
+    )
+    job = SyncJob(
+        integration_id=integration_id,
+        job_type=JobType.OUTBOUND_CHATWOOT_MESSAGE_TO_ZZAP,
+        status=JobStatus.PROCESSING,
+        zzap_thread_id=thread.id,
+        chatwoot_conversation_id=20,
+        chatwoot_message_id=30,
+        payload={
+            "content": "hello",
+            "created_at": created_at.isoformat(),
+            "attachments": [],
+        },
+    )
+    captured_guard: dict[str, object] = {}
+
+    async def fake_get_thread(*args: object, **kwargs: object) -> ZZapThread:
+        return thread
+
+    async def fake_persist_outbound_message_mapping(
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        captured_guard.update(kwargs)
+
+    monkeypatch.setattr(outbound, "get_zzap_thread_by_id", fake_get_thread)
+    monkeypatch.setattr(
+        outbound,
+        "persist_outbound_message_mapping",
+        fake_persist_outbound_message_mapping,
+        raising=False,
+    )
+
+    processor = OutboundProcessor(
+        chatwoot_client=_FakeChatwootClient(),
+        zzap_client=_FakeZZapClient(),
+        max_attachment_bytes=10,
+    )
+
+    await processor.process_job(cast(AsyncSession, _FakeSession()), job)
+
+    assert captured_guard["integration_id"] == integration_id
+    assert captured_guard["thread"] is thread
+    assert captured_guard["chatwoot_conversation_id"] == 20
+    assert captured_guard["chatwoot_message_id"] == 30
+    assert captured_guard["zzap_message_date"] == created_at
+    assert captured_guard["message_hash"] == sha256_hex("hello")
+    assert isinstance(captured_guard["fingerprint"], str)
 
 
 @pytest.mark.asyncio
