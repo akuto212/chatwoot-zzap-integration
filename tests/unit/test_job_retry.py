@@ -2,19 +2,28 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, cast
+from uuid import uuid4
 
 import pytest
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import JobStatus, JobType, SyncJob
+from app.db.models import (
+    JobStatus,
+    JobType,
+    MessageDirection,
+    MessageMapping,
+    MessageStatus,
+    SyncJob,
+)
 from app.workers.cleanup import cleanup_old_records
-from app.workers.jobs import process_claimed_job, retry_delay_for_attempt
+from app.workers.jobs import RateLimitedZZapClient, process_claimed_job, retry_delay_for_attempt
 from app.workers.locks import (
     ADVISORY_LOCK_KEY,
     release_worker_advisory_lock,
     try_worker_advisory_lock,
 )
+from app.workers.rate_limit import ZZapRateLimiter
 
 
 def test_outbound_retry_schedule() -> None:
@@ -174,6 +183,7 @@ async def test_process_claimed_job_marks_success_and_clears_lock() -> None:
     assert job.locked_by is None
     assert job.locked_at is None
     assert job.next_attempt_at is None
+    assert len(session.executed_statements) == 1
     assert session.flush_count == 1
 
 
@@ -222,7 +232,7 @@ async def test_process_claimed_job_exhausts_outbound_and_creates_private_note() 
         integration_id="11111111-1111-4111-8111-111111111111",
         job_type=JobType.OUTBOUND_CHATWOOT_MESSAGE_TO_ZZAP,
         status=JobStatus.PROCESSING,
-        attempt_count=4,
+        attempt_count=3,
         locked_by="worker-1",
         locked_at=datetime(2026, 7, 4, tzinfo=UTC),
         chatwoot_conversation_id=20,
@@ -252,10 +262,81 @@ async def test_process_claimed_job_exhausts_outbound_and_creates_private_note() 
     assert "https://zzap.test/a.txt" not in session.added_jobs[0].payload["content"]
 
 
+@pytest.mark.asyncio
+async def test_process_claimed_job_exhausts_inbound_and_marks_mapping_failed() -> None:
+    mapping_id = uuid4()
+    mapping = MessageMapping(
+        id=mapping_id,
+        integration_id="11111111-1111-4111-8111-111111111111",
+        direction=MessageDirection.INBOUND,
+        status=MessageStatus.PENDING,
+        fingerprint="fingerprint",
+        message_hash="hash",
+    )
+    job = SyncJob(
+        integration_id="11111111-1111-4111-8111-111111111111",
+        job_type=JobType.INBOUND_ZZAP_MESSAGE_TO_CHATWOOT,
+        status=JobStatus.PROCESSING,
+        attempt_count=5,
+        locked_by="worker-1",
+        locked_at=datetime(2026, 7, 4, tzinfo=UTC),
+        message_mapping_id=mapping_id,
+        payload={"message": "hello"},
+    )
+    session = _FakeJobSession(message_mappings={mapping_id: mapping})
+
+    await process_claimed_job(
+        cast(AsyncSession, session),
+        job=job,
+        inbound_processor=_FakeProcessor(error=RuntimeError("delivery failed")),
+        outbound_processor=_FakeProcessor(),
+        chatwoot_client=_FakeChatwootClient(),
+        now=datetime(2026, 7, 4, tzinfo=UTC),
+    )
+
+    assert job.status == JobStatus.FAILED
+    assert mapping.status == MessageStatus.FAILED
+    assert job.next_attempt_at is None
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_zzap_client_waits_between_requests() -> None:
+    inner = _FakeZZapApiClient()
+    sleep_delays: list[float] = []
+    clock_values = iter([10.0, 11.0, 13.0])
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_delays.append(delay)
+
+    client = RateLimitedZZapClient(
+        inner,
+        limiter=ZZapRateLimiter(interval_seconds=3.0),
+        sleep=fake_sleep,
+        monotonic=lambda: next(clock_values),
+    )
+
+    await client.upload_file(file_name="a.txt", file_body_base64="abc")
+    await client.send_message(
+        user_key="zzap-user",
+        message="hello",
+        message_date=datetime(2026, 7, 4, tzinfo=UTC),
+        is_online=True,
+    )
+
+    assert sleep_delays == [2.0]
+    assert inner.calls == ["upload", "send"]
+
+
 class _FakeJobSession:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        message_mappings: dict[object, MessageMapping] | None = None,
+    ) -> None:
         self.flush_count = 0
         self.added_jobs: list[SyncJob] = []
+        self.message_mappings = message_mappings or {}
+        self.executed_statements: list[object] = []
 
     def add(self, instance: object) -> None:
         if isinstance(instance, SyncJob):
@@ -263,6 +344,15 @@ class _FakeJobSession:
 
     async def flush(self) -> None:
         self.flush_count += 1
+
+    async def get(self, model: object, instance_id: object) -> object | None:
+        if model is MessageMapping:
+            return self.message_mappings.get(instance_id)
+        return None
+
+    async def execute(self, statement: object) -> object:
+        self.executed_statements.append(statement)
+        return object()
 
 
 class _FakeProcessor:
@@ -292,3 +382,28 @@ class _FakeChatwootClient:
     async def create_private_note(self, *, conversation_id: int, content: str) -> int:
         self.private_notes.append((conversation_id, content))
         return 10
+
+
+class _FakeZZapApiClient:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def upload_file(
+        self,
+        *,
+        file_name: str,
+        file_body_base64: str,
+        upload_type: int = 1,
+    ) -> str:
+        self.calls.append("upload")
+        return "https://zzap.test/a.txt"
+
+    async def send_message(
+        self,
+        *,
+        user_key: str,
+        message: str,
+        message_date: datetime,
+        is_online: bool,
+    ) -> None:
+        self.calls.append("send")

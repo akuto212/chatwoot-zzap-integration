@@ -22,6 +22,7 @@ class ZZapActionQueue:
         self._pending_summary = False
         self._pending_thread_fetches: set[str] = set()
         self._last_summary_scheduled_at: float | None = None
+        self._summary_not_before: float | None = None
 
     def enqueue_summary_poll(self) -> None:
         if self._pending_summary:
@@ -30,6 +31,8 @@ class ZZapActionQueue:
         self._queue.append(ZZapAction(ZZapActionType.SUMMARY_POLL))
 
     def enqueue_summary_poll_if_due(self, *, now: float, interval_seconds: float) -> bool:
+        if self._summary_not_before is not None and now < self._summary_not_before:
+            return False
         if self._last_summary_scheduled_at is not None:
             if now - self._last_summary_scheduled_at < interval_seconds:
                 return False
@@ -39,6 +42,11 @@ class ZZapActionQueue:
             return False
         self._last_summary_scheduled_at = now
         return True
+
+    def delay_summary_until(self, *, now: float, delay_seconds: float) -> None:
+        not_before = now + delay_seconds
+        if self._summary_not_before is None or not_before > self._summary_not_before:
+            self._summary_not_before = not_before
 
     def enqueue_thread_fetch(self, thread_user_key: str) -> None:
         if thread_user_key in self._pending_thread_fetches:

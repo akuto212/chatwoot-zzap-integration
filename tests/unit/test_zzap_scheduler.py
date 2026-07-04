@@ -31,3 +31,12 @@ def test_summary_poll_is_scheduled_when_due() -> None:
 
     assert queue.enqueue_summary_poll_if_due(now=13.0, interval_seconds=3.0)
     assert queue.size() == 1
+
+
+def test_summary_poll_can_be_delayed_after_error() -> None:
+    queue = ZZapActionQueue()
+
+    queue.delay_summary_until(now=10.0, delay_seconds=300.0)
+
+    assert not queue.enqueue_summary_poll_if_due(now=100.0, interval_seconds=3.0)
+    assert queue.enqueue_summary_poll_if_due(now=310.0, interval_seconds=3.0)

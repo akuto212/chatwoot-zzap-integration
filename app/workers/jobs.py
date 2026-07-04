@@ -14,7 +14,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.clients.chatwoot import ChatwootApiError, ChatwootClient
 from app.clients.zzap import ZZapApiError, ZZapClient, ZZapMessageDto, ZZapThreadDto
-from app.db.models import JobStatus, JobType, MessageMapping, ServiceState, SyncJob, ZZapThread
+from app.db.models import (
+    JobStatus,
+    JobType,
+    MessageMapping,
+    MessageStatus,
+    ServiceState,
+    SyncJob,
+    ZZapThread,
+)
 from app.db.repositories import (
     claim_next_job,
     persist_inbound_message_job,
@@ -44,6 +52,8 @@ INBOUND_RETRY_DELAYS = [
     timedelta(minutes=5),
     timedelta(minutes=15),
 ]
+MAX_OUTBOUND_ATTEMPTS = 3
+MAX_INBOUND_ATTEMPTS = 5
 
 
 def retry_delay_for_attempt(*, direction: str, attempt_count: int) -> timedelta | None:
@@ -52,6 +62,59 @@ def retry_delay_for_attempt(*, direction: str, attempt_count: int) -> timedelta 
     if index < 0 or index >= len(delays):
         return None
     return delays[index]
+
+
+class RateLimitedZZapClient:
+    def __init__(
+        self,
+        client: Any,
+        *,
+        limiter: ZZapRateLimiter,
+        sleep: Callable[[float], Any] = asyncio.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._client = client
+        self._limiter = limiter
+        self._sleep = sleep
+        self._monotonic = monotonic
+
+    async def upload_file(
+        self,
+        *,
+        file_name: str,
+        file_body_base64: str,
+        upload_type: int = 1,
+    ) -> str:
+        await self._wait_for_slot()
+        return await self._client.upload_file(
+            file_name=file_name,
+            file_body_base64=file_body_base64,
+            upload_type=upload_type,
+        )
+
+    async def send_message(
+        self,
+        *,
+        user_key: str,
+        message: str,
+        message_date: datetime,
+        is_online: bool,
+    ) -> None:
+        await self._wait_for_slot()
+        await self._client.send_message(
+            user_key=user_key,
+            message=message,
+            message_date=message_date,
+            is_online=is_online,
+        )
+
+    async def _wait_for_slot(self) -> None:
+        now = self._monotonic()
+        delay = self._limiter.delay_until_next(now=now)
+        if delay > 0:
+            await self._sleep(delay)
+            now = self._monotonic()
+        self._limiter.mark_request_started(now=now)
 
 
 async def run_worker_loop(settings: Settings) -> None:
@@ -83,7 +146,7 @@ async def run_worker_loop(settings: Settings) -> None:
             )
             outbound_processor = OutboundProcessor(
                 chatwoot_client=chatwoot_client,
-                zzap_client=zzap_client,
+                zzap_client=RateLimitedZZapClient(zzap_client, limiter=rate_limiter),
                 max_attachment_bytes=settings.max_attachment_bytes,
             )
             async with engine.connect() as lock_connection:
@@ -128,6 +191,7 @@ async def run_worker_iteration(
 ) -> bool:
     current_time = now() if now else datetime.now(tz=UTC)
     did_work = False
+    claimed_job_id = None
     async with session_scope(session_factory) as session:
         reset_count = await reset_stale_processing_jobs(
             session,
@@ -137,15 +201,25 @@ async def run_worker_iteration(
         did_work = reset_count > 0
         job = await claim_next_job(session, worker_id=worker_id)
         if job is not None:
-            await process_claimed_job(
-                session,
-                job=job,
-                inbound_processor=inbound_processor,
-                outbound_processor=outbound_processor,
-                chatwoot_client=chatwoot_client,
-                now=current_time,
-            )
+            claimed_job_id = job.id
             did_work = True
+
+    if claimed_job_id is not None:
+        async with session_scope(session_factory) as session:
+            job = await session.get(SyncJob, claimed_job_id)
+            if (
+                job is not None
+                and job.status == JobStatus.PROCESSING
+                and job.locked_by == worker_id
+            ):
+                await process_claimed_job(
+                    session,
+                    job=job,
+                    inbound_processor=inbound_processor,
+                    outbound_processor=outbound_processor,
+                    chatwoot_client=chatwoot_client,
+                    now=current_time,
+                )
 
     scheduled = action_queue.enqueue_summary_poll_if_due(
         now=(monotonic or time.monotonic)(),
@@ -240,6 +314,7 @@ async def process_next_zzap_action(
                 )
             return True
     except Exception as exc:
+        _delay_zzap_poll_after_error(action_queue, now=current_monotonic, exc=exc)
         async with session_scope(session_factory) as session:
             await _record_external_auth_failure(
                 session,
@@ -261,6 +336,7 @@ async def process_claimed_job(
     now: datetime | None = None,
 ) -> None:
     current_time = now or datetime.now(tz=UTC)
+    payload_before_dispatch = dict(job.payload)
     try:
         await _dispatch_job(
             session,
@@ -272,6 +348,8 @@ async def process_claimed_job(
     except Exception as exc:
         await _record_external_auth_failure(session, integration_id=job.integration_id, exc=exc)
         _mark_job_failed_or_pending(job, exc=exc, now=current_time)
+        if _should_mark_inbound_mapping_failed(job):
+            await _mark_inbound_mapping_failed(session, job)
         if _should_create_exhausted_outbound_note(job):
             session.add(
                 SyncJob(
@@ -288,6 +366,12 @@ async def process_claimed_job(
     if job.status == JobStatus.PROCESSING:
         job.status = JobStatus.SUCCEEDED
         job.payload = {}
+    if job.status == JobStatus.SUCCEEDED:
+        await _record_job_auth_success(
+            session,
+            job=job,
+            payload_before_dispatch=payload_before_dispatch,
+        )
     _clear_job_lock(job)
     job.next_attempt_at = None
     job.last_error = None
@@ -320,14 +404,20 @@ async def _dispatch_job(
 
 
 def _mark_job_failed_or_pending(job: SyncJob, *, exc: Exception, now: datetime) -> None:
-    delay = retry_delay_for_attempt(
-        direction=_retry_direction_for_job(job),
-        attempt_count=job.attempt_count,
-    )
-    if delay is None:
+    if job.attempt_count >= _max_attempts_for_job(job):
         job.status = JobStatus.FAILED
         job.next_attempt_at = None
     else:
+        delay = retry_delay_for_attempt(
+            direction=_retry_direction_for_job(job),
+            attempt_count=job.attempt_count,
+        )
+        if delay is None:
+            job.status = JobStatus.FAILED
+            job.next_attempt_at = None
+            job.last_error = str(exc)
+            _clear_job_lock(job)
+            return
         job.status = JobStatus.PENDING
         job.next_attempt_at = now + delay
     job.last_error = str(exc)
@@ -338,6 +428,28 @@ def _retry_direction_for_job(job: SyncJob) -> str:
     if job.job_type == JobType.INBOUND_ZZAP_MESSAGE_TO_CHATWOOT:
         return "inbound"
     return "outbound"
+
+
+def _max_attempts_for_job(job: SyncJob) -> int:
+    if job.job_type == JobType.INBOUND_ZZAP_MESSAGE_TO_CHATWOOT:
+        return MAX_INBOUND_ATTEMPTS
+    return MAX_OUTBOUND_ATTEMPTS
+
+
+def _should_mark_inbound_mapping_failed(job: SyncJob) -> bool:
+    return (
+        job.job_type == JobType.INBOUND_ZZAP_MESSAGE_TO_CHATWOOT
+        and job.status == JobStatus.FAILED
+        and job.message_mapping_id is not None
+    )
+
+
+async def _mark_inbound_mapping_failed(session: AsyncSession, job: SyncJob) -> None:
+    if job.message_mapping_id is None:
+        return
+    mapping = await session.get(MessageMapping, job.message_mapping_id)
+    if mapping is not None:
+        mapping.status = MessageStatus.FAILED
 
 
 def _should_create_exhausted_outbound_note(job: SyncJob) -> bool:
@@ -356,6 +468,38 @@ def _outbound_failure_note_content(exc: Exception) -> str:
 def _clear_job_lock(job: SyncJob) -> None:
     job.locked_at = None
     job.locked_by = None
+
+
+async def _record_job_auth_success(
+    session: AsyncSession,
+    *,
+    job: SyncJob,
+    payload_before_dispatch: dict[str, Any],
+) -> None:
+    if job.job_type in {
+        JobType.INBOUND_ZZAP_MESSAGE_TO_CHATWOOT,
+        JobType.CHATWOOT_PRIVATE_NOTE,
+    }:
+        await _set_auth_failure_state(
+            session,
+            integration_id=job.integration_id,
+            key="chatwoot_auth_failed",
+            failed=False,
+        )
+    if job.job_type == JobType.OUTBOUND_CHATWOOT_MESSAGE_TO_ZZAP:
+        await _set_auth_failure_state(
+            session,
+            integration_id=job.integration_id,
+            key="zzap_auth_failed",
+            failed=False,
+        )
+        if payload_before_dispatch.get("attachments"):
+            await _set_auth_failure_state(
+                session,
+                integration_id=job.integration_id,
+                key="chatwoot_auth_failed",
+                failed=False,
+            )
 
 
 async def _run_cleanup_once(
@@ -444,6 +588,8 @@ async def _persist_thread_messages(
             cursor_guard_fingerprint=thread.cursor_guard_fingerprint,
         ):
             continue
+        if thread.cursor_message_date is None and item.unread is not True:
+            continue
         await persist_inbound_message_job(
             session,
             integration_id=settings.integration_id,
@@ -499,12 +645,14 @@ class _MessageItem:
         message_date: datetime,
         sender_user_key: str,
         message_text: str,
+        unread: bool | None,
         fingerprint: Any,
         response_index: int,
     ) -> None:
         self.message_date = message_date
         self.sender_user_key = sender_user_key
         self.message_text = message_text
+        self.unread = unread
         self.fingerprint = fingerprint
         self.response_index = response_index
 
@@ -534,6 +682,7 @@ def _message_items(
                 message_date=message_date,
                 sender_user_key=sender_user_key,
                 message_text=message_text,
+                unread=message.unread,
                 fingerprint=fingerprint,
                 response_index=index,
             ),
@@ -611,3 +760,24 @@ async def _record_external_auth_failure(
             key="chatwoot_auth_failed",
             failed=True,
         )
+
+
+def _delay_zzap_poll_after_error(
+    action_queue: ZZapActionQueue,
+    *,
+    now: float,
+    exc: Exception,
+) -> None:
+    action_queue.delay_summary_until(now=now, delay_seconds=_zzap_poll_backoff_seconds(exc))
+
+
+def _zzap_poll_backoff_seconds(exc: Exception) -> float:
+    if isinstance(exc, ZZapApiError):
+        if exc.status_code == 401:
+            return 300.0
+        if exc.status_code == 429:
+            return 60.0
+    message = str(exc).lower()
+    if "captcha" in message or "rate" in message:
+        return 60.0
+    return 30.0
