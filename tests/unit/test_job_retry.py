@@ -308,21 +308,23 @@ async def test_process_claimed_job_exhausts_inbound_and_marks_mapping_failed() -
 
 @pytest.mark.asyncio
 async def test_rate_limited_zzap_client_waits_between_requests() -> None:
-    inner = _FakeZZapApiClient()
     sleep_delays: list[float] = []
-    clock_values = iter([10.0, 11.0, 13.0])
+    clock = _MutableClock(10.0)
+    inner = _FakeZZapApiClient(clock=clock)
 
     async def fake_sleep(delay: float) -> None:
         sleep_delays.append(delay)
+        clock.value += delay
 
     client = RateLimitedZZapClient(
         inner,
         limiter=ZZapRateLimiter(interval_seconds=3.0),
         sleep=fake_sleep,
-        monotonic=lambda: next(clock_values),
+        monotonic=clock,
     )
 
     await client.upload_file(file_name="a.txt", file_body_base64="abc")
+    clock.value = 13.0
     await client.send_message(
         user_key="zzap-user",
         message="hello",
@@ -330,8 +332,52 @@ async def test_rate_limited_zzap_client_waits_between_requests() -> None:
         is_online=True,
     )
 
-    assert sleep_delays == [2.0]
+    assert sleep_delays == [1.0]
     assert inner.calls == ["upload", "send"]
+
+
+@pytest.mark.asyncio
+async def test_zzap_polling_limiter_waits_after_request_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    integration_id = uuid4()
+    clock = _MutableClock(10.0)
+    queue = ZZapActionQueue()
+    queue.enqueue_summary_poll()
+    zzap_client = _ClockedZZapApiClient(clock)
+    rate_limiter = ZZapRateLimiter(interval_seconds=3.0)
+
+    async def fake_process_summary_threads(*args: object, **kwargs: object) -> None:
+        cast(ZZapActionQueue, kwargs["action_queue"]).enqueue_thread_fetch("thread-1")
+
+    monkeypatch.setattr(jobs, "_process_summary_threads", fake_process_summary_threads)
+    monkeypatch.setattr(jobs, "_set_auth_failure_state", _async_noop)
+    monkeypatch.setattr(jobs, "session_scope", lambda session_factory: _FakeSessionScope())
+
+    did_work = await process_next_zzap_action(
+        session_factory=cast(Any, object()),
+        settings=cast(Any, _FakeSettings(integration_id=integration_id)),
+        zzap_client=zzap_client,
+        action_queue=queue,
+        rate_limiter=rate_limiter,
+        monotonic=clock,
+    )
+
+    assert did_work is True
+    assert zzap_client.calls == ["list_threads"]
+
+    clock.value = 13.0
+    did_work = await process_next_zzap_action(
+        session_factory=cast(Any, object()),
+        settings=cast(Any, _FakeSettings(integration_id=integration_id)),
+        zzap_client=zzap_client,
+        action_queue=queue,
+        rate_limiter=rate_limiter,
+        monotonic=clock,
+    )
+
+    assert did_work is False
+    assert zzap_client.calls == ["list_threads"]
 
 
 @pytest.mark.asyncio
@@ -460,7 +506,8 @@ class _FakeChatwootClient:
 
 
 class _FakeZZapApiClient:
-    def __init__(self) -> None:
+    def __init__(self, *, clock: _MutableClock | None = None) -> None:
+        self.clock = clock
         self.calls: list[str] = []
 
     async def upload_file(
@@ -471,6 +518,8 @@ class _FakeZZapApiClient:
         upload_type: int = 1,
     ) -> str:
         self.calls.append("upload")
+        if self.clock is not None:
+            self.clock.value = 11.0
         return "https://zzap.test/a.txt"
 
     async def send_message(
@@ -503,6 +552,33 @@ class _FakeThread:
 class _FailingZZapClient:
     async def list_messages(self, *args: object, **kwargs: object) -> list[object]:
         raise RuntimeError("network failed")
+
+
+class _MutableClock:
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    def __call__(self) -> float:
+        return self.value
+
+
+class _ClockedZZapApiClient:
+    def __init__(self, clock: _MutableClock) -> None:
+        self.clock = clock
+        self.calls: list[str] = []
+
+    async def list_threads(self, *, page: int, page_size: int) -> list[object]:
+        self.calls.append("list_threads")
+        self.clock.value = 12.0
+        return []
+
+    async def list_messages(self, *args: object, **kwargs: object) -> list[object]:
+        self.calls.append("list_messages")
+        return []
+
+
+async def _async_noop(*args: object, **kwargs: object) -> None:
+    return None
 
 
 class _FakeSessionScope:
