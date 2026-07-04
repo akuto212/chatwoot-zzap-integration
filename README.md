@@ -1,22 +1,22 @@
-# ZZap Chatwoot Integration
+# Интеграция ZZap и Chatwoot
 
-Litestar microservice for bidirectional message sync between ZZap and a self-hosted Chatwoot instance.
+Микросервис на Litestar для двусторонней синхронизации сообщений между ZZap и self-hosted Chatwoot.
 
-The service imports new ZZap messages into Chatwoot, sends public outgoing Chatwoot operator messages back to ZZap, and uploads Chatwoot attachments to ZZap before sending them as file links. PostgreSQL is the only stateful dependency; durable jobs, idempotency records, mappings, polling cursors, and readiness state are stored there.
+Сервис импортирует новые сообщения из ZZap в Chatwoot, отправляет публичные исходящие сообщения операторов Chatwoot обратно в ZZap, а вложения из Chatwoot загружает в ZZap и добавляет в сообщение как ссылки на файлы. PostgreSQL является единственной stateful-зависимостью: в нем хранятся durable jobs, записи идемпотентности, маппинги, курсоры polling и состояние readiness.
 
-## Runtime Modes
+## Режимы запуска
 
-- `web`: serves `/health`, `/ready`, and the Chatwoot webhook endpoint.
-- `worker`: polls ZZap and processes durable jobs.
-- `all`: runs web and worker in one process for local Docker Compose usage.
+- `web`: обслуживает `/health`, `/ready` и webhook endpoint для Chatwoot.
+- `worker`: опрашивает ZZap и обрабатывает durable jobs.
+- `all`: запускает web и worker в одном процессе для локального Docker Compose.
 
-Production should run separate `web` and `worker` containers against the same PostgreSQL database. The worker uses a PostgreSQL advisory lock so only one active worker polls ZZap and processes jobs.
+В production рекомендуется запускать отдельные контейнеры `web` и `worker`, подключенные к одной базе PostgreSQL. Worker использует PostgreSQL advisory lock, поэтому только один активный worker опрашивает ZZap и обрабатывает jobs.
 
-## Environment
+## Переменные окружения
 
-Create a `.env` from `.env.example` and set real secrets/IDs.
+Создайте `.env` на основе `.env.example` и укажите реальные секреты и идентификаторы.
 
-Required variables:
+Обязательные переменные:
 
 ```dotenv
 APP_MODE=all
@@ -31,7 +31,7 @@ CHATWOOT_API_TOKEN=replace-me
 CHATWOOT_WEBHOOK_SECRET=replace-me
 ```
 
-Optional variables:
+Опциональные переменные:
 
 ```dotenv
 MAX_ATTACHMENT_BYTES=10485760
@@ -40,70 +40,70 @@ FAILED_RECORD_RETENTION_DAYS=30
 WEBHOOK_DELIVERY_RETENTION_DAYS=30
 ```
 
-`INTEGRATION_ID` is a stable UUID for this ZZap to Chatwoot binding. The first release supports one active binding configured through environment variables.
+`INTEGRATION_ID` - стабильный UUID для этой связки ZZap и Chatwoot. Первая версия поддерживает одну активную связку, настроенную через переменные окружения.
 
-## Local Start
+## Локальный запуск
 
 ```bash
 docker compose up --build
 ```
 
-The container entrypoint runs:
+Entrypoint контейнера выполняет:
 
 ```bash
 uv run alembic upgrade head
 ```
 
-before starting the selected runtime mode. If migrations fail, the container exits.
+перед запуском выбранного runtime mode. Если миграции завершаются с ошибкой, контейнер останавливается.
 
-Local endpoints:
+Локальные endpoints:
 
 - `GET http://localhost:8000/health`
 - `GET http://localhost:8000/ready`
 - `POST http://localhost:8000/webhooks/chatwoot`
 
-## Chatwoot Webhook
+## Webhook Chatwoot
 
-Configure a Chatwoot webhook for `message_created` events:
+Настройте webhook Chatwoot для событий `message_created`:
 
 ```text
 https://your-service.example.com/webhooks/chatwoot
 ```
 
-The webhook must include Chatwoot HMAC headers:
+Webhook должен содержать HMAC-заголовки Chatwoot:
 
 - `X-Chatwoot-Signature`
 - `X-Chatwoot-Timestamp`
 - `X-Chatwoot-Delivery`
 
-The service verifies the signature with `CHATWOOT_WEBHOOK_SECRET` over `timestamp + "." + raw_body` and expects the signature format `sha256=<hex>`. Invalid signatures return `403`.
+Сервис проверяет подпись через `CHATWOOT_WEBHOOK_SECRET` по строке `timestamp + "." + raw_body` и ожидает формат подписи `sha256=<hex>`. Некорректная подпись возвращает `403`.
 
-Only public outgoing operator messages for `CHATWOOT_INBOX_ID` are sent to ZZap. Private notes, system/bot messages, incoming/imported messages, wrong inbox events, and unknown conversation mappings are ignored with `200 OK`.
+В ZZap отправляются только публичные исходящие сообщения операторов из inbox `CHATWOOT_INBOX_ID`. Private notes, системные и bot-сообщения, входящие/импортированные сообщения, события из другого inbox и неизвестные conversation mappings игнорируются с ответом `200 OK`.
 
-## ZZap Rate Limit
+## Rate Limit ZZap
 
-All ZZap API calls share one global limiter: at most one request every 3 seconds. This includes:
+Все вызовы ZZap API проходят через один глобальный limiter: не более одного запроса каждые 3 секунды. Это включает:
 
 - summary polling;
-- per-thread message fetches;
-- file uploads;
-- outbound message sends.
+- загрузку сообщений отдельного thread;
+- загрузку файлов;
+- отправку исходящих сообщений.
 
-Summary polling is scheduled every 3 seconds as a target, not a guarantee. If fetches, uploads, or outbound sends are queued, polling waits in the same FIFO queue. On ZZap `401`, polling backs off to rare retries and `/ready` becomes unhealthy. On `429`, rate-limit, or captcha-like responses, the scheduler backs off while readiness stays healthy.
+Summary polling планируется каждые 3 секунды как целевой интервал, а не как гарантия. Если в очереди уже есть fetch, upload или outbound send, polling ждет своей очереди в той же FIFO-очереди. При ZZap `401` polling переходит на редкие retry, а `/ready` становится unhealthy. При `429`, rate-limit или captcha-like ответах scheduler увеличивает backoff, но readiness остается healthy.
 
-## Known Limitations
+## Известные ограничения
 
-- Only the first ZZap thread page is tracked: `page=1&page_size=100`.
-- ZZap messages do not expose stable message IDs, so deduplication uses a synthetic fingerprint.
-- Exact duplicate messages from the same sender in the same second may be treated as duplicates.
-- Old read ZZap history is not imported.
-- Read/unread state is not synchronized.
-- Chatwoot edits and deletes are not synchronized.
-- ZZap edits and deletes are not synchronized.
-- ZZap to Chatwoot attachments are not converted to native Chatwoot attachments; links remain text.
-- Chatwoot reconciliation polling is not implemented in the first release.
+- Отслеживается только первая страница ZZap threads: `page=1&page_size=100`.
+- Сообщения ZZap не имеют стабильных message IDs, поэтому дедупликация использует синтетический fingerprint.
+- Полностью одинаковые сообщения от одного отправителя в одну и ту же секунду могут быть обработаны как дубликаты.
+- Старая прочитанная история ZZap не импортируется.
+- Состояние read/unread не синхронизируется.
+- Редактирование и удаление сообщений в Chatwoot не синхронизируются.
+- Редактирование и удаление сообщений в ZZap не синхронизируются.
+- Вложения из ZZap в Chatwoot не конвертируются в нативные вложения Chatwoot; ссылки остаются текстом.
+- Chatwoot reconciliation polling не реализован в первой версии.
 
-## Tests
+## Тесты
 
 ```bash
 rtk env UV_CACHE_DIR=/tmp/uv-cache uv run ruff check .
