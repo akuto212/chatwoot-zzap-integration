@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import mimetypes
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from urllib.parse import unquote, urlparse
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +30,16 @@ from app.db.repositories import (
 
 class InboundProcessingError(RuntimeError):
     pass
+
+
+ZZAP_IMAGE_TAG_RE = re.compile(r"\[img\](https?://[^\[]+?)\[/img\]", re.IGNORECASE)
+DEFAULT_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class InboundMessageContent:
+    content: str
+    attachments: list[dict[str, object]]
 
 
 def should_import_zzap_message(
@@ -55,6 +68,7 @@ class InboundProcessor:
     chatwoot_client: Any
     inbox_id: int
     integration_id: UUID
+    max_attachment_bytes: int = DEFAULT_MAX_ATTACHMENT_BYTES
 
     async def process_job(self, session: AsyncSession, job: SyncJob) -> None:
         if job.zzap_thread_id is None:
@@ -67,7 +81,7 @@ class InboundProcessor:
 
         payload = job.payload
         zzap_user_key = _required_payload_string(payload, "zzap_user_key")
-        content = _required_payload_string(payload, "message")
+        content = await self._message_content(_required_payload_string(payload, "message"))
         user_name = _display_name(payload.get("zzap_user_name"), zzap_user_key)
 
         contact = await self._get_or_create_contact(session, zzap_user_key, user_name)
@@ -78,7 +92,8 @@ class InboundProcessor:
         )
         chatwoot_message_id = await self.chatwoot_client.create_incoming_message(
             conversation_id=conversation.chatwoot_conversation_id,
-            content=content,
+            content=content.content,
+            attachments=content.attachments or None,
         )
 
         mark_message_mapping_delivered(
@@ -91,6 +106,29 @@ class InboundProcessor:
         job.chatwoot_message_id = chatwoot_message_id
         job.payload = {}
         await session.flush()
+
+    async def _message_content(self, raw_content: str) -> InboundMessageContent:
+        image_urls = _zzap_image_urls(raw_content)
+        if not image_urls:
+            return InboundMessageContent(content=raw_content, attachments=[])
+
+        attachments: list[dict[str, object]] = []
+        for index, image_url in enumerate(image_urls):
+            file_name = _file_name_from_url(image_url, index=index)
+            attachments.append(
+                {
+                    "file_name": file_name,
+                    "content": await self.chatwoot_client.download_attachment(
+                        image_url,
+                        max_bytes=self.max_attachment_bytes,
+                    ),
+                    "content_type": _content_type(file_name),
+                },
+            )
+        return InboundMessageContent(
+            content=_strip_zzap_image_tags(raw_content).strip(),
+            attachments=attachments,
+        )
 
     async def _load_mapping(self, session: AsyncSession, job: SyncJob) -> MessageMapping:
         if job.message_mapping_id is None:
@@ -176,6 +214,33 @@ def _required_payload_string(payload: dict[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value:
         raise InboundProcessingError(f"inbound job payload is missing {key}")
     return value
+
+
+def _zzap_image_urls(content: str) -> list[str]:
+    return [match.group(1).strip() for match in ZZAP_IMAGE_TAG_RE.finditer(content)]
+
+
+def _strip_zzap_image_tags(content: str) -> str:
+    return ZZAP_IMAGE_TAG_RE.sub("", content)
+
+
+def _file_name_from_url(url: str, *, index: int) -> str:
+    file_name = unquote(urlparse(url).path.rstrip("/").rsplit("/", 1)[-1]).strip()
+    if _has_file_extension(file_name):
+        return file_name
+    return f"zzap-image-{index + 1}"
+
+
+def _has_file_extension(file_name: str) -> bool:
+    if "." not in file_name:
+        return False
+    stem, extension = file_name.rsplit(".", 1)
+    return bool(stem and extension)
+
+
+def _content_type(file_name: str) -> str:
+    guessed_type, _ = mimetypes.guess_type(file_name)
+    return guessed_type or "application/octet-stream"
 
 
 def _display_name(value: object, zzap_user_key: str) -> str:

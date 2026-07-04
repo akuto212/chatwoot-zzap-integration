@@ -30,6 +30,41 @@ async def test_chatwoot_client_creates_private_note() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chatwoot_client_creates_incoming_message_with_attachment() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["api_access_token"] == "token"
+        assert request.url.path == "/api/v1/accounts/1/conversations/2/messages"
+        assert request.headers["content-type"].startswith("multipart/form-data")
+        body = await request.aread()
+        assert b'name="message_type"' in body
+        assert b"incoming" in body
+        assert b'name="attachments[]"; filename="photo.webp"' in body
+        assert b"image-body" in body
+        return httpx.Response(200, json={"id": 10})
+
+    client = ChatwootClient(
+        base_url="https://chatwoot.example.test",
+        account_id=1,
+        api_token="token",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+    message_id = await client.create_incoming_message(
+        conversation_id=2,
+        content="",
+        attachments=[
+            {
+                "file_name": "photo.webp",
+                "content": b"image-body",
+                "content_type": "image/webp",
+            },
+        ],
+    )
+
+    assert message_id == 10
+
+
+@pytest.mark.asyncio
 async def test_chatwoot_client_returns_contact_source_id() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/v1/accounts/1/contacts"

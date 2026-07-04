@@ -78,7 +78,33 @@ class ChatwootClient:
             json={"status": status},
         )
 
-    async def create_incoming_message(self, *, conversation_id: int, content: str) -> int:
+    async def create_incoming_message(
+        self,
+        *,
+        conversation_id: int,
+        content: str,
+        attachments: list[dict[str, object]] | None = None,
+    ) -> int:
+        if attachments:
+            files = [
+                (
+                    "attachments[]",
+                    (
+                        str(attachment["file_name"]),
+                        attachment["content"],
+                        str(attachment.get("content_type") or "application/octet-stream"),
+                    ),
+                )
+                for attachment in attachments
+            ]
+            payload = await self._request_json(
+                "POST",
+                f"/conversations/{conversation_id}/messages",
+                data={"content": content, "message_type": "incoming"},
+                files=files,
+            )
+            return _required_int(payload, "id")
+
         payload = await self._request_json(
             "POST",
             f"/conversations/{conversation_id}/messages",
