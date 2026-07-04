@@ -54,7 +54,10 @@ class ZZapActionQueue:
         self._pending_thread_fetches.add(thread_user_key)
         self._queue.append(ZZapAction(ZZapActionType.THREAD_FETCH, thread_user_key))
 
-    def pop_next(self) -> ZZapAction | None:
+    def pop_next(self, *, now: float | None = None) -> ZZapAction | None:
+        if now is not None and self._summary_not_before is not None:
+            if now < self._summary_not_before:
+                return None
         if not self._queue:
             return None
         action = self._queue.popleft()

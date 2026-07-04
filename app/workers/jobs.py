@@ -257,7 +257,7 @@ async def process_next_zzap_action(
     current_monotonic = (monotonic or time.monotonic)()
     if rate_limiter.delay_until_next(now=current_monotonic) > 0:
         return False
-    action = action_queue.pop_next()
+    action = action_queue.pop_next(now=current_monotonic)
     if action is None:
         return False
 
