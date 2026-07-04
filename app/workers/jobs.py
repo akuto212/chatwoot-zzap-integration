@@ -94,11 +94,14 @@ class RateLimitedZZapClient:
         upload_type: int = 1,
     ) -> str:
         await self._wait_for_slot()
-        return await self._client.upload_file(
-            file_name=file_name,
-            file_body_base64=file_body_base64,
-            upload_type=upload_type,
-        )
+        try:
+            return await self._client.upload_file(
+                file_name=file_name,
+                file_body_base64=file_body_base64,
+                upload_type=upload_type,
+            )
+        finally:
+            self._mark_request_finished()
 
     async def send_message(
         self,
@@ -109,20 +112,24 @@ class RateLimitedZZapClient:
         is_online: bool,
     ) -> None:
         await self._wait_for_slot()
-        await self._client.send_message(
-            user_key=user_key,
-            message=message,
-            message_date=message_date,
-            is_online=is_online,
-        )
+        try:
+            await self._client.send_message(
+                user_key=user_key,
+                message=message,
+                message_date=message_date,
+                is_online=is_online,
+            )
+        finally:
+            self._mark_request_finished()
 
     async def _wait_for_slot(self) -> None:
         now = self._monotonic()
         delay = self._limiter.delay_until_next(now=now)
         if delay > 0:
             await self._sleep(delay)
-            now = self._monotonic()
-        self._limiter.mark_request_started(now=now)
+
+    def _mark_request_finished(self) -> None:
+        self._limiter.mark_request_finished(now=self._monotonic())
 
 
 async def run_worker_loop(settings: Settings) -> None:
@@ -282,10 +289,12 @@ async def process_next_zzap_action(
     if action is None:
         return False
 
-    rate_limiter.mark_request_started(now=current_monotonic)
     try:
         if action.action_type == ZZapActionType.SUMMARY_POLL:
-            threads = await zzap_client.list_threads(page=1, page_size=100)
+            try:
+                threads = await zzap_client.list_threads(page=1, page_size=100)
+            finally:
+                rate_limiter.mark_request_finished(now=(monotonic or time.monotonic)())
             async with session_scope(session_factory) as session:
                 await _set_auth_failure_state(
                     session,
@@ -312,11 +321,14 @@ async def process_next_zzap_action(
                 return True
 
             page_size = min(100, max(20, thread.unread_count + 5))
-            messages = await zzap_client.list_messages(
-                user_key=thread.user_key,
-                page=1,
-                page_size=page_size,
-            )
+            try:
+                messages = await zzap_client.list_messages(
+                    user_key=thread.user_key,
+                    page=1,
+                    page_size=page_size,
+                )
+            finally:
+                rate_limiter.mark_request_finished(now=(monotonic or time.monotonic)())
             async with session_scope(session_factory) as session:
                 await _set_auth_failure_state(
                     session,
