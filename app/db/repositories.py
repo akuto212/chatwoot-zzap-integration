@@ -408,6 +408,18 @@ async def reset_stale_processing_jobs(
         SyncJob.status == JobStatus.PROCESSING,
         SyncJob.locked_at < cutoff,
     )
+    failed_inbound_mapping_ids = select(SyncJob.message_mapping_id).where(
+        stale_filter,
+        SyncJob.job_type == JobType.INBOUND_ZZAP_MESSAGE_TO_CHATWOOT,
+        SyncJob.attempt_count >= 5,
+        SyncJob.message_mapping_id.is_not(None),
+    )
+    await session.execute(
+        update(MessageMapping)
+        .where(MessageMapping.id.in_(failed_inbound_mapping_ids))
+        .values(status=MessageStatus.FAILED)
+        .execution_options(synchronize_session=False),
+    )
     exhausted_result = await session.execute(
         update(SyncJob)
         .where(stale_filter, exhausted_filter)

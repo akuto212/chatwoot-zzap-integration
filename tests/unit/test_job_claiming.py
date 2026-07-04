@@ -101,7 +101,7 @@ async def test_claim_next_job_does_not_flush_when_no_job_is_due() -> None:
 @pytest.mark.asyncio
 async def test_reset_stale_processing_jobs_uses_conditional_update() -> None:
     now = datetime(2026, 7, 3, tzinfo=UTC)
-    session = _FakeUpdateSession(rowcounts=[1, 2])
+    session = _FakeUpdateSession(rowcounts=[1, 1, 2])
 
     reset_count = await reset_stale_processing_jobs(
         cast(AsyncSession, session),
@@ -110,8 +110,16 @@ async def test_reset_stale_processing_jobs_uses_conditional_update() -> None:
     )
 
     assert reset_count == 3
-    assert len(session.compiled_statements) == 2
-    failed_update = session.compiled_statements[0]
+    assert len(session.compiled_statements) == 3
+    mapping_update = session.compiled_statements[0]
+    assert mapping_update.startswith("UPDATE message_mappings")
+    assert "status='failed'" in mapping_update
+    assert "message_mappings.id IN" in mapping_update
+    assert "sync_jobs.job_type = 'inbound_zzap_message_to_chatwoot'" in mapping_update
+    assert "sync_jobs.status = 'processing'" in mapping_update
+    assert "sync_jobs.attempt_count >= 5" in mapping_update
+
+    failed_update = session.compiled_statements[1]
     assert failed_update.startswith("UPDATE sync_jobs")
     assert "status='failed'" in failed_update
     assert "sync_jobs.status = 'processing'" in failed_update
@@ -119,7 +127,7 @@ async def test_reset_stale_processing_jobs_uses_conditional_update() -> None:
     assert "sync_jobs.attempt_count >= 5" in failed_update
     assert "sync_jobs.attempt_count >= 3" in failed_update
 
-    pending_update = session.compiled_statements[1]
+    pending_update = session.compiled_statements[2]
     assert pending_update.startswith("UPDATE sync_jobs")
     assert "status='pending'" in pending_update
     assert "sync_jobs.status = 'processing'" in pending_update
