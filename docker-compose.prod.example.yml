@@ -1,0 +1,18 @@
+services:
+  web:
+    image: chatwoot-zzap-integration:latest
+    env_file:
+      - .env
+    environment:
+      APP_MODE: web
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  worker:
+    image: chatwoot-zzap-integration:latest
+    env_file:
+      - .env
+    environment:
+      APP_MODE: worker
+    restart: unless-stopped
