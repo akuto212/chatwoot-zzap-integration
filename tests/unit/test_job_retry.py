@@ -30,6 +30,13 @@ def test_inbound_retry_schedule() -> None:
     assert retry_delay_for_attempt(direction="inbound", attempt_count=5) == timedelta(minutes=15)
 
 
+def test_retry_schedule_returns_none_out_of_range() -> None:
+    assert retry_delay_for_attempt(direction="outbound", attempt_count=0) is None
+    assert retry_delay_for_attempt(direction="outbound", attempt_count=4) is None
+    assert retry_delay_for_attempt(direction="inbound", attempt_count=0) is None
+    assert retry_delay_for_attempt(direction="inbound", attempt_count=6) is None
+
+
 @pytest.mark.asyncio
 async def test_try_worker_advisory_lock_uses_configured_key() -> None:
     session = _FakeLockSession(lock_acquired=True)
@@ -77,6 +84,7 @@ async def test_cleanup_deletes_old_records_and_preserves_cursor_guards() -> None
     failed_mappings_delete = session.compiled_statements[1]
     assert "DELETE FROM message_mappings" in failed_mappings_delete
     assert "message_mappings.status = 'failed'" in failed_mappings_delete
+    assert "message_mappings.is_cursor_guard IS false" in failed_mappings_delete
     assert "2026-06-04" in failed_mappings_delete
 
     failed_jobs_delete = session.compiled_statements[2]

@@ -41,6 +41,7 @@ async def cleanup_old_records(
     failed_message_mappings = await session.execute(
         delete(MessageMapping).where(
             MessageMapping.status == MessageStatus.FAILED,
+            MessageMapping.is_cursor_guard.is_(False),
             MessageMapping.created_at < failed_record_cutoff,
         ),
     )
