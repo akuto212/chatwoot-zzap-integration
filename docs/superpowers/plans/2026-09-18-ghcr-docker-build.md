@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Проверять сборку Docker-образа в pull request и публиковать `latest` в GHCR после push в `main`.
+**Goal:** Проверять сборку Docker-образа в pull request и публиковать `latest` в GHCR после push в `master`.
 
-**Architecture:** Один workflow GitHub Actions определяет два триггера и одну job. Он собирает Dockerfile на всех триггерах, но публикует образ в GHCR только при push в `main`, используя краткоживущий `GITHUB_TOKEN` и cache GitHub Actions.
+**Architecture:** Один workflow GitHub Actions определяет два триггера и одну job. Он собирает Dockerfile на всех триггерах, но публикует образ в GHCR только при push в `master`, используя краткоживущий `GITHUB_TOKEN` и cache GitHub Actions.
 
 **Tech Stack:** GitHub Actions, Docker Buildx, GHCR, actionlint.
 
@@ -30,10 +30,10 @@ name: Build and publish Docker image
 on:
   pull_request:
     branches:
-      - main
+      - master
   push:
     branches:
-      - main
+      - master
 
 permissions:
   contents: read
@@ -77,7 +77,7 @@ Expected: команда завершается с кодом `0` без выв�
 
 Run: `git diff --check && git diff -- .github/workflows/docker-image.yml`
 
-Expected: `git diff --check` завершается с кодом `0`; diff содержит только новый workflow с `pull_request` и `push` для `main`, тегом `latest`, условной публикацией и кэшем Buildx.
+Expected: `git diff --check` завершается с кодом `0`; diff содержит только новый workflow с `pull_request` и `push` для `master`, тегом `latest`, условной публикацией и кэшем Buildx.
 
 - [x] **Step 5: Закоммитить workflow**
 
