@@ -131,6 +131,9 @@ class _FakeLockSession:
         self.statements: list[object] = []
         self.parameters: list[object] = []
 
+    async def commit(self) -> None:
+        pass
+
     async def execute(self, statement: object, parameters: object | None = None) -> _ScalarResult:
         self.statements.append(statement)
         self.parameters.append(parameters)
