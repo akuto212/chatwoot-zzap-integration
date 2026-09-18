@@ -11,7 +11,12 @@ async def try_worker_advisory_lock(session: AsyncSession) -> bool:
         text("SELECT pg_try_advisory_lock(:key)"),
         {"key": ADVISORY_LOCK_KEY},
     )
-    return bool(result.scalar_one())
+    acquired = bool(result.scalar_one())
+    # This is a session-level lock on the worker's dedicated connection.
+    # End the snapshot/transaction without releasing the lock: otherwise its
+    # xmin prevents VACUUM from reclaiming versions for the worker's lifetime.
+    await session.commit()
+    return acquired
 
 
 async def release_worker_advisory_lock(session: AsyncSession) -> None:
@@ -19,3 +24,4 @@ async def release_worker_advisory_lock(session: AsyncSession) -> None:
         text("SELECT pg_advisory_unlock(:key)"),
         {"key": ADVISORY_LOCK_KEY},
     )
+    await session.commit()

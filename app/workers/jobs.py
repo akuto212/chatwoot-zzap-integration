@@ -209,9 +209,16 @@ async def run_worker_loop(settings: Settings) -> None:
                         if not did_work:
                             await asyncio.sleep(1.0)
                 finally:
-                    await release_worker_advisory_lock(lock_session)
-                    await lock_session.close()
-                    await engine.dispose()
+                    try:
+                        await release_worker_advisory_lock(lock_session)
+                    finally:
+                        # Never return a session-locked connection to the pool,
+                        # including on cancellation or an unlock/network error.
+                        try:
+                            await lock_connection.invalidate()
+                        finally:
+                            await lock_session.close()
+                            await engine.dispose()
 
 
 async def run_worker_iteration(
@@ -608,17 +615,26 @@ async def _process_summary_threads(
             message_last_hash=message_last_hash,
             unread_count=thread_dto.unread_count,
         )
-        thread = await upsert_zzap_thread(
-            session,
-            integration_id=settings.integration_id,
-            user_key=thread_dto.user_key,
-            user_name=thread_dto.user_name,
-            message_last_date=message_last_date,
-            message_last_hash=message_last_hash,
-            unread_count=thread_dto.unread_count,
-            read_only=thread_dto.read_only,
-            last_polled_at=datetime.now(tz=UTC),
-        )
+        thread = existing_thread
+        # Persist the poll timestamp only with a changed summary. Writing it on
+        # every poll creates a new row version even when ZZap has no new data.
+        if (
+            thread is None
+            or changed
+            or thread.user_name != thread_dto.user_name
+            or thread.read_only != thread_dto.read_only
+        ):
+            thread = await upsert_zzap_thread(
+                session,
+                integration_id=settings.integration_id,
+                user_key=thread_dto.user_key,
+                user_name=thread_dto.user_name,
+                message_last_date=message_last_date,
+                message_last_hash=message_last_hash,
+                unread_count=thread_dto.unread_count,
+                read_only=thread_dto.read_only,
+                last_polled_at=datetime.now(tz=UTC),
+            )
         if existing_thread is None and thread_dto.unread_count == 0:
             thread.cursor_message_date = message_last_date
             thread.cursor_guard_fingerprint = message_last_hash
