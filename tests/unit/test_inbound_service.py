@@ -266,10 +266,7 @@ async def test_inbound_processor_converts_zzap_image_tag_to_chatwoot_attachment(
         fingerprint="fingerprint",
         message_hash="hash",
     )
-    image_url = (
-        "https://koj.blob.core.windows.net/zzap-upload/upload/messagefiles/"
-        "67f36901dae479903df9ddcc04b3304e.webp"
-    )
+    image_url = "https://storage.example.com/zzap-upload/upload/messagefiles/example.webp"
     job = SyncJob(
         integration_id=integration_id,
         job_type=JobType.INBOUND_ZZAP_MESSAGE_TO_CHATWOOT,
@@ -316,7 +313,7 @@ async def test_inbound_processor_converts_zzap_image_tag_to_chatwoot_attachment(
             "",
             [
                 {
-                    "file_name": "67f36901dae479903df9ddcc04b3304e.webp",
+                    "file_name": "example.webp",
                     "content": b"webp-body",
                     "content_type": "image/webp",
                 },

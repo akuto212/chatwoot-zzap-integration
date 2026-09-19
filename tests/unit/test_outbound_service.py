@@ -155,7 +155,7 @@ async def test_persist_outbound_webhook_event_uses_active_storage_url_extension(
         "attachments": [
             {
                 "data_url": (
-                    "https://chat.gt-shop.ru/rails/active_storage/blobs/redirect/token/b58.webp"
+                    "https://chat.example.com/rails/active_storage/blobs/redirect/token/b58.webp"
                 ),
             },
         ],
@@ -199,7 +199,7 @@ async def test_persist_outbound_webhook_event_uses_active_storage_url_extension(
     assert created is True
     assert session.jobs[0].payload["attachments"] == [
         {
-            "data_url": "https://chat.gt-shop.ru/rails/active_storage/blobs/redirect/token/b58.webp",
+            "data_url": "https://chat.example.com/rails/active_storage/blobs/redirect/token/b58.webp",
             "file_name": "b58.webp",
         },
     ]
