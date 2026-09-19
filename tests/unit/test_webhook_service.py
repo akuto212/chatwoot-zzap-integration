@@ -5,35 +5,59 @@ import pytest
 from app.services.outbound import ChatwootWebhookDecision, classify_chatwoot_message_created
 
 
-def test_classify_ignores_wrong_event() -> None:
+@pytest.mark.parametrize("message_type", ["outgoing", "template"])
+def test_classify_ignores_wrong_event(message_type: str) -> None:
     decision = classify_chatwoot_message_created(
-        {"event": "conversation_updated"},
+        {
+            "event": "conversation_updated",
+            "message_type": message_type,
+            "private": False,
+            "conversation": {"id": 20, "inbox_id": 2},
+            "sender": {"type": "user"},
+        },
         2,
     )
     assert decision == ChatwootWebhookDecision.IGNORE
 
 
-def test_classify_accepts_public_outgoing_operator_message() -> None:
+@pytest.mark.parametrize("message_type", ["outgoing", "template"])
+@pytest.mark.parametrize(
+    "sender_fields",
+    [
+        {"sender": {"type": "user"}},
+        {"sender": {"type": "agent_bot"}},
+        {"sender": {"type": "automation"}},
+        {"sender": {}},
+        {"sender": None},
+        {"sender": "automation"},
+        {},
+    ],
+)
+def test_classify_accepts_public_outbound_regardless_of_sender(
+    message_type: str,
+    sender_fields: dict[str, object],
+) -> None:
     decision = classify_chatwoot_message_created(
         payload={
             "event": "message_created",
             "id": 10,
-            "message_type": "outgoing",
+            "message_type": message_type,
             "private": False,
             "conversation": {"id": 20, "inbox_id": 2},
-            "sender": {"type": "user"},
+            **sender_fields,
         },
         expected_inbox_id=2,
     )
     assert decision == ChatwootWebhookDecision.ACCEPT
 
 
-def test_classify_ignores_private_note() -> None:
+@pytest.mark.parametrize("message_type", ["outgoing", "template"])
+def test_classify_ignores_private_note(message_type: str) -> None:
     decision = classify_chatwoot_message_created(
         payload={
             "event": "message_created",
             "id": 10,
-            "message_type": "outgoing",
+            "message_type": message_type,
             "private": True,
             "conversation": {"id": 20, "inbox_id": 2},
             "sender": {"type": "user"},
@@ -65,17 +89,26 @@ def test_classify_ignores_private_note() -> None:
         {
             "event": "message_created",
             "id": 10,
-            "message_type": "outgoing",
+            "message_type": "activity",
             "private": False,
             "conversation": {"id": 20, "inbox_id": 2},
-            "sender": {"type": "agent_bot"},
+            "sender": {"type": "user"},
         },
         {
             "event": "message_created",
             "id": 10,
             "message_type": "outgoing",
             "private": False,
-            "conversation": {"id": 20, "inbox_id": 2},
+        },
+        {
+            "event": "message_created",
+            "message_type": "template",
+            "conversation": {"inbox_id": 999},
+        },
+        {
+            "event": "message_created",
+            "message_type": "outgoing",
+            "conversation": [],
         },
         {
             "event": "message_created",
@@ -95,7 +128,7 @@ def test_classify_ignores_private_note() -> None:
         },
     ],
 )
-def test_classify_ignores_non_operator_or_malformed_payloads(payload: dict[str, object]) -> None:
+def test_classify_ignores_ineligible_or_malformed_payloads(payload: dict[str, object]) -> None:
     decision = classify_chatwoot_message_created(payload, 2)
 
     assert decision == ChatwootWebhookDecision.IGNORE

@@ -192,7 +192,7 @@ def classify_chatwoot_message_created(
 ) -> ChatwootWebhookDecision:
     if payload.get("event") != "message_created":
         return ChatwootWebhookDecision.IGNORE
-    if payload.get("message_type") != "outgoing":
+    if payload.get("message_type") not in {"outgoing", "template"}:
         return ChatwootWebhookDecision.IGNORE
     if payload.get("private") is True:
         return ChatwootWebhookDecision.IGNORE
@@ -207,12 +207,6 @@ def classify_chatwoot_message_created(
         return ChatwootWebhookDecision.IGNORE
 
     if inbox_id != expected_inbox_id:
-        return ChatwootWebhookDecision.IGNORE
-
-    sender = payload.get("sender")
-    if not isinstance(sender, dict):
-        return ChatwootWebhookDecision.IGNORE
-    if sender.get("type") != "user":
         return ChatwootWebhookDecision.IGNORE
 
     return ChatwootWebhookDecision.ACCEPT

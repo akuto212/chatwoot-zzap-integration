@@ -68,12 +68,21 @@ def test_outbound_job_dedupe_index_is_unique_partial() -> None:
 
 
 @pytest.mark.asyncio
-async def test_persist_outbound_webhook_event_creates_job(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("message_type", ["outgoing", "template"])
+@pytest.mark.parametrize("content", ["hello", "", None])
+async def test_persist_outbound_webhook_event_creates_job(
+    monkeypatch: pytest.MonkeyPatch,
+    message_type: str,
+    content: str | None,
+) -> None:
     integration_id = uuid4()
     payload = {
         "event": "message_created",
+        "message_type": message_type,
         "id": 10,
-        "content": "hello",
+        "content": content,
+        "content_type": "input_select",
+        "content_attributes": {"items": [{"title": "Option1", "value": "Option 1"}]},
         "created_at": "2026-07-04T10:00:00+03:00",
         "conversation": {"id": 20, "inbox_id": 2},
         "attachments": [{"file_type": "image", "data_url": "https://chatwoot.test/a.png"}],
@@ -126,7 +135,8 @@ async def test_persist_outbound_webhook_event_creates_job(monkeypatch: pytest.Mo
     assert session.jobs[0].chatwoot_message_id == 10
     assert session.jobs[0].chatwoot_conversation_id == 20
     assert session.jobs[0].zzap_thread_id == conversation.zzap_thread_id
-    assert session.jobs[0].payload["content"] == "hello"
+    assert session.jobs[0].payload["content"] == (content or "")
+    assert "content_attributes" not in session.jobs[0].payload
     assert session.jobs[0].payload["attachments"] == [
         {"data_url": "https://chatwoot.test/a.png", "file_name": "a.png"},
     ]
