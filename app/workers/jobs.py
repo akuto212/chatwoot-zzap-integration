@@ -339,14 +339,29 @@ async def process_next_zzap_action(
                 return True
 
             page_size = min(100, max(20, thread.unread_count + 5))
-            try:
-                messages = await zzap_client.list_messages(
-                    user_key=thread.user_key,
-                    page=1,
-                    page_size=page_size,
-                )
-            finally:
-                rate_limiter.mark_request_finished(now=(monotonic or time.monotonic)())
+            messages: list[ZZapMessageDto] = []
+            page = 1
+            while True:
+                delay = rate_limiter.delay_until_next(now=(monotonic or time.monotonic)())
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                try:
+                    result = await zzap_client.list_messages_page(
+                        user_key=thread.user_key,
+                        page=page,
+                        page_size=page_size,
+                    )
+                finally:
+                    rate_limiter.mark_request_finished(now=(monotonic or time.monotonic)())
+                messages.extend(result.messages)
+                if result.total_count is not None:
+                    if page * page_size >= result.total_count:
+                        break
+                    if not result.messages:
+                        raise ZZapApiError(200, "ZZap returned an empty page before total_count")
+                elif len(result.messages) < page_size:
+                    break
+                page += 1
             async with session_scope(session_factory) as session:
                 await _set_auth_failure_state(
                     session,

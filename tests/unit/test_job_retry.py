@@ -4,11 +4,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, cast
 from uuid import uuid4
 
+import httpx
 import pytest
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.clients.zzap import ZZapMessageDto
+from app.clients.zzap import ZZapClient, ZZapMessageDto
 from app.db.models import (
     JobStatus,
     JobType,
@@ -660,7 +661,7 @@ class _FakeThread:
 
 
 class _FailingZZapClient:
-    async def list_messages(self, *args: object, **kwargs: object) -> list[object]:
+    async def list_messages_page(self, *args: object, **kwargs: object) -> list[object]:
         raise RuntimeError("network failed")
 
 
@@ -682,7 +683,7 @@ class _ClockedZZapApiClient:
         self.clock.value = 12.0
         return []
 
-    async def list_messages(self, *args: object, **kwargs: object) -> list[object]:
+    async def list_messages_page(self, *args: object, **kwargs: object) -> list[object]:
         self.calls.append("list_messages")
         return []
 
@@ -707,3 +708,94 @@ class _EmptyKnownFingerprintResult:
 class _FakeKnownFingerprintSession:
     async def execute(self, statement: object) -> _EmptyKnownFingerprintResult:
         return _EmptyKnownFingerprintResult()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("total_count", [0, 20, 22, 40, 45])
+@pytest.mark.parametrize("include_total", [True, False])
+@pytest.mark.parametrize("fail_second_page", [True, False])
+async def test_thread_fetch_loads_all_pages_before_persisting(
+    monkeypatch: pytest.MonkeyPatch,
+    total_count: int,
+    include_total: bool,
+    fail_second_page: bool,
+) -> None:
+
+    integration_id = uuid4()
+    thread = _FakeThread(id=uuid4(), integration_id=integration_id, user_key="thread-1")
+    queue = ZZapActionQueue()
+    queue.enqueue_thread_fetch(thread.user_key)
+    clock = _MutableClock(10.0)
+    requested_pages: list[int] = []
+    delays: list[float] = []
+    persisted: list[list[str | None]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params["page"])
+        assert request.url.params["page_size"] == "20"
+        requested_pages.append(page)
+        clock.value += 1
+        if fail_second_page and page == 2:
+            return httpx.Response(500)
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "result": {
+                    "data": [
+                        {"message": str(number)}
+                        for number in range((page - 1) * 20 + 1, min(page * 20, total_count) + 1)
+                    ]
+                },
+                "result_info": {"total_count": total_count} if include_total else {},
+            },
+        )
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+        clock.value += delay
+
+    async def get_thread(*args: object, **kwargs: object) -> object:
+        return thread
+
+    async def persist(*args: object, **kwargs: Any) -> None:
+        persisted.append([message.message for message in kwargs["messages"]])
+
+    class Session:
+        async def get(self, *args: object) -> object:
+            return thread
+
+    class Scope(_FakeSessionScope):
+        async def __aenter__(self) -> object:
+            return Session()
+
+    monkeypatch.setattr(jobs, "session_scope", lambda factory: Scope())
+    monkeypatch.setattr(jobs, "_get_thread_by_user_key", get_thread)
+    monkeypatch.setattr(jobs, "_set_auth_failure_state", _async_noop)
+    monkeypatch.setattr(jobs, "_persist_thread_messages", persist)
+    monkeypatch.setattr(jobs, "_record_external_auth_failure", _async_noop)
+    monkeypatch.setattr(jobs.asyncio, "sleep", fake_sleep)
+    limiter = ZZapRateLimiter(interval_seconds=3.0)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        await process_next_zzap_action(
+            session_factory=cast(Any, object()),
+            settings=cast(Any, _FakeSettings(integration_id=integration_id)),
+            zzap_client=ZZapClient(
+                base_url="https://zzap.test", api_key="secret", http_client=http
+            ),
+            action_queue=queue,
+            rate_limiter=limiter,
+            monotonic=clock,
+        )
+
+    page_count = max(1, (total_count + 19) // 20) if include_total else total_count // 20 + 1
+    if fail_second_page and page_count > 1:
+        assert persisted == []
+        assert requested_pages == [1, 2]
+        assert queue.size() == 1
+        assert limiter.last_request_finished_at == clock.value
+        return
+    assert persisted == [[str(number) for number in range(1, total_count + 1)]]
+    assert requested_pages == list(range(1, page_count + 1))
+    assert delays == [3.0] * (page_count - 1)
+    assert limiter.last_request_finished_at == clock.value

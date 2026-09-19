@@ -27,6 +27,12 @@ class ZZapMessageDto:
     unread: bool | None
 
 
+@dataclass(frozen=True)
+class ZZapMessagePage:
+    messages: list[ZZapMessageDto]
+    total_count: int | None
+
+
 class ZZapApiError(RuntimeError):
     def __init__(self, status_code: int, message: str) -> None:
         super().__init__(message)
@@ -65,13 +71,27 @@ class ZZapClient:
         page: int,
         page_size: int,
     ) -> list[ZZapMessageDto]:
+        result = await self.list_messages_page(
+            user_key=user_key,
+            page=page,
+            page_size=page_size,
+        )
+        return result.messages
+
+    async def list_messages_page(
+        self,
+        *,
+        user_key: str,
+        page: int,
+        page_size: int,
+    ) -> ZZapMessagePage:
         encoded_user_key = quote(user_key, safe="")
         payload = await self._request_json(
             "GET",
             f"/api/client/v1/messages/{encoded_user_key}",
             params={"page": page, "page_size": page_size},
         )
-        return [
+        messages = [
             ZZapMessageDto(
                 user_key=item.get("user_key"),
                 user_name=item.get("user_name"),
@@ -81,6 +101,11 @@ class ZZapClient:
             )
             for item in _result_data(payload)
         ]
+        info = payload.get("result_info")
+        total_count = info.get("total_count") if isinstance(info, dict) else None
+        if total_count is not None and (type(total_count) is not int or total_count < 0):
+            raise ZZapApiError(200, "ZZap response result_info.total_count was invalid")
+        return ZZapMessagePage(messages=messages, total_count=total_count)
 
     async def upload_file(
         self,
