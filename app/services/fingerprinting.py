@@ -17,7 +17,7 @@ class MessageFingerprint:
 
 
 def normalize_message_text(value: str) -> str:
-    return normalize("NFC", value.replace("\r\n", "\n").replace("\r", "\n"))
+    return normalize("NFC", value.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " "))
 
 
 def sha256_hex(value: str) -> str:

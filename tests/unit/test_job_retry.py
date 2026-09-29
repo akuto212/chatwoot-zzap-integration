@@ -19,7 +19,7 @@ from app.db.models import (
     SyncJob,
     ZZapThread,
 )
-from app.services.fingerprinting import sha256_hex
+from app.services.fingerprinting import build_zzap_fingerprint
 from app.workers import jobs
 from app.workers.cleanup import cleanup_old_records
 from app.workers.jobs import (
@@ -438,8 +438,22 @@ async def test_unread_bootstrap_imports_messages_without_per_message_unread_flag
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outbound_text", "polled_text"),
+    [
+        ("operator reply", "operator reply"),
+        (
+            "Добрый день!\n\nК сожалению, снято с производства "
+            "\n\nGeneral Motors 23491497 - 5/1/2023\tDiscontinued",
+            "Добрый день!\n\nК сожалению, снято с производства "
+            "\n\nGeneral Motors 23491497 - 5/1/2023 Discontinued",
+        ),
+    ],
+)
 async def test_outbound_echo_is_not_imported_as_inbound_message(
     monkeypatch: pytest.MonkeyPatch,
+    outbound_text: str,
+    polled_text: str,
 ) -> None:
     integration_id = uuid4()
     echo_date = datetime(2026, 7, 4, 16, 12, 11, tzinfo=UTC)
@@ -452,13 +466,34 @@ async def test_outbound_echo_is_not_imported_as_inbound_message(
         cursor_message_date=datetime(2026, 7, 4, 16, 10, tzinfo=UTC),
     )
     persisted_payloads: list[dict[str, object]] = []
+    outbound_fingerprint = build_zzap_fingerprint(
+        integration_id=str(integration_id),
+        thread_user_key=thread.user_key,
+        sender_user_key=thread.user_key,
+        message_date=echo_date,
+        message_text=outbound_text,
+    )
+    mapping = MessageMapping(
+        integration_id=integration_id,
+        direction=MessageDirection.OUTBOUND,
+        status=MessageStatus.SUCCEEDED,
+        fingerprint=outbound_fingerprint.fingerprint,
+        message_hash=outbound_fingerprint.message_hash,
+        zzap_thread_id=thread.id,
+        zzap_message_date=echo_date,
+        created_at=echo_date,
+    )
 
-    async def fake_known_outbound_echo_guards(*args: object, **kwargs: object) -> list[object]:
+    async def fake_known_outbound_echo_guards(*args: object, **kwargs: Any) -> list[object]:
+        assert kwargs["integration_id"] == mapping.integration_id
+        assert kwargs["thread_id"] == mapping.zzap_thread_id
+        if mapping.message_hash not in kwargs["message_hashes"]:
+            return []
         return [
             jobs.OutboundEchoGuard(
-                message_hash=sha256_hex("operator reply"),
-                zzap_message_date=echo_date,
-                created_at=echo_date,
+                message_hash=mapping.message_hash,
+                zzap_message_date=mapping.zzap_message_date,
+                created_at=mapping.created_at,
             ),
         ]
 
@@ -481,8 +516,8 @@ async def test_outbound_echo_is_not_imported_as_inbound_message(
             ZZapMessageDto(
                 user_key="seller-user",
                 user_name="Operator",
-                message_date=echo_date.isoformat(),
-                message="operator reply",
+                message_date=(echo_date + timedelta(milliseconds=1)).isoformat(),
+                message=polled_text,
                 unread=None,
             ),
         ],
