@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -40,6 +41,7 @@ from app.services.fingerprinting import (
 )
 from app.services.inbound import InboundProcessor, should_import_zzap_message
 from app.services.outbound import OutboundProcessor
+from app.services.poll_health import PollHealth
 from app.settings import Settings
 from app.workers.cleanup import cleanup_old_records
 from app.workers.locks import release_worker_advisory_lock, try_worker_advisory_lock
@@ -180,6 +182,13 @@ async def run_worker_loop(settings: Settings) -> None:
                 try:
                     if not await try_worker_advisory_lock(lock_session):
                         raise RuntimeError("another worker already holds the advisory lock")
+                    poll_health = PollHealth(
+                        session_factory,
+                        settings.integration_id,
+                        settings.zzap_poll_degraded_seconds,
+                    )
+                    await poll_health.initialize()
+                    monitor = asyncio.create_task(poll_health.monitor())
                     last_cleanup_at = datetime.now(tz=UTC)
                     await _run_cleanup_once(
                         session_factory=session_factory,
@@ -205,20 +214,27 @@ async def run_worker_loop(settings: Settings) -> None:
                             action_queue=action_queue,
                             rate_limiter=rate_limiter,
                             now=_constant_datetime(iteration_time),
+                            poll_health=poll_health,
                         )
                         if not did_work:
                             await asyncio.sleep(1.0)
                 finally:
                     try:
-                        await release_worker_advisory_lock(lock_session)
+                        if "monitor" in locals():
+                            monitor.cancel()
+                            with suppress(asyncio.CancelledError):
+                                await monitor
                     finally:
-                        # Never return a session-locked connection to the pool,
-                        # including on cancellation or an unlock/network error.
                         try:
-                            await lock_connection.invalidate()
+                            await release_worker_advisory_lock(lock_session)
                         finally:
-                            await lock_session.close()
-                            await engine.dispose()
+                            # Never return a session-locked connection to the pool,
+                            # including on cancellation or an unlock/network error.
+                            try:
+                                await lock_connection.invalidate()
+                            finally:
+                                await lock_session.close()
+                                await engine.dispose()
 
 
 async def run_worker_iteration(
@@ -234,6 +250,7 @@ async def run_worker_iteration(
     rate_limiter: ZZapRateLimiter,
     now: Callable[[], datetime] | None = None,
     monotonic: Callable[[], float] | None = None,
+    poll_health: PollHealth | None = None,
 ) -> bool:
     current_time = now() if now else datetime.now(tz=UTC)
     did_work = False
@@ -272,14 +289,18 @@ async def run_worker_iteration(
         interval_seconds=3.0,
     )
     did_work = scheduled or did_work
-    did_work = await process_next_zzap_action(
-        session_factory=session_factory,
-        settings=settings,
-        zzap_client=zzap_client,
-        action_queue=action_queue,
-        rate_limiter=rate_limiter,
-        monotonic=monotonic,
-    ) or did_work
+    did_work = (
+        await process_next_zzap_action(
+            session_factory=session_factory,
+            settings=settings,
+            zzap_client=zzap_client,
+            action_queue=action_queue,
+            rate_limiter=rate_limiter,
+            monotonic=monotonic,
+            poll_health=poll_health,
+        )
+        or did_work
+    )
 
     async with session_scope(session_factory) as session:
         await _upsert_service_state(
@@ -299,6 +320,7 @@ async def process_next_zzap_action(
     action_queue: ZZapActionQueue,
     rate_limiter: ZZapRateLimiter,
     monotonic: Callable[[], float] | None = None,
+    poll_health: PollHealth | None = None,
 ) -> bool:
     current_monotonic = (monotonic or time.monotonic)()
     if rate_limiter.delay_until_next(now=current_monotonic) > 0:
@@ -309,10 +331,20 @@ async def process_next_zzap_action(
 
     try:
         if action.action_type == ZZapActionType.SUMMARY_POLL:
+            if poll_health is not None:
+                await poll_health.record_attempt()
             try:
-                threads = await zzap_client.list_threads(page=1, page_size=100)
-            finally:
-                rate_limiter.mark_request_finished(now=(monotonic or time.monotonic)())
+                try:
+                    threads = await zzap_client.list_threads(page=1, page_size=100)
+                finally:
+                    rate_limiter.mark_request_finished(now=(monotonic or time.monotonic)())
+            except Exception as exc:
+                if poll_health is not None:
+                    await poll_health.record_result(exc)
+                raise
+            else:
+                if poll_health is not None:
+                    await poll_health.record_result(None)
             async with session_scope(session_factory) as session:
                 await _set_auth_failure_state(
                     session,
@@ -963,7 +995,8 @@ def _zzap_poll_backoff_seconds(exc: Exception) -> float:
             return 300.0
         if exc.status_code == 429:
             return 60.0
+    hint = getattr(exc, "legacy_backoff_hint", None)
     message = str(exc).lower()
-    if "captcha" in message or "rate" in message:
+    if hint is True or (hint is None and ("captcha" in message or "rate" in message)):
         return 60.0
     return 30.0

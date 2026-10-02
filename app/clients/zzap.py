@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import httpx
+
+from app.services.diagnostics import emit, network_category, response_diagnostics
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,9 @@ class ZZapApiError(RuntimeError):
     def __init__(self, status_code: int, message: str) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.category = "http_unknown"
+        self.actual_http_status: int | None = None
+        self.legacy_backoff_hint: bool | None = None
 
 
 class ZZapClient:
@@ -149,30 +155,124 @@ class ZZapClient:
         )
 
     async def _request_json(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
-        response = await self._http.request(
-            method,
-            f"{self._base_url}{path}",
-            headers={"zzap-api-key": self._api_key},
-            **kwargs,
+        endpoint = (
+            "/api/client/v1/messages/{user_key}"
+            if path.startswith("/api/client/v1/messages/")
+            else path
         )
+        query = {
+            k: v
+            for k, v in kwargs.get("params", {}).items()
+            if k in {"page", "page_size"} and isinstance(v, int)
+        }
+        sensitive = [self._api_key]
+        if path.startswith("/api/client/v1/messages/"):
+            sensitive.extend([path.rsplit("/", 1)[-1], unquote(path.rsplit("/", 1)[-1])])
+        sensitive.extend(
+            value for value in kwargs.get("json", {}).values() if isinstance(value, str)
+        )
+        started = time.monotonic()
+        try:
+            response = await self._http.request(
+                method, f"{self._base_url}{path}", headers={"zzap-api-key": self._api_key}, **kwargs
+            )
+        except httpx.RequestError as exc:
+            category = network_category(exc)
+            emit(
+                "zzap_api_request_failed",
+                warning=True,
+                method=method,
+                endpoint=endpoint,
+                query=query,
+                duration_seconds=time.monotonic() - started,
+                category=category,
+                exception_type=type(exc).__name__,
+                source="unknown",
+            )
+            safe = type(exc)(f"ZZap request failed: {category}")
+            safe.category = category  # type: ignore[attr-defined]
+            safe.legacy_backoff_hint = any(  # type: ignore[attr-defined]
+                word in str(exc).lower() for word in ("captcha", "rate")
+            )
+            raise safe from None
         if response.status_code >= 400:
-            raise ZZapApiError(response.status_code, response.text)
+            diagnostics = response_diagnostics(response, tuple(sensitive))
+            emit(
+                "zzap_api_request_failed",
+                warning=True,
+                method=method,
+                endpoint=endpoint,
+                query=query,
+                duration_seconds=time.monotonic() - started,
+                **diagnostics,
+            )
+            error = ZZapApiError(
+                response.status_code, f"ZZap HTTP {response.status_code}: {diagnostics['category']}"
+            )
+            error.actual_http_status = response.status_code
+            error.category = diagnostics["category"]
+            error.legacy_backoff_hint = any(
+                word in response.text.lower() for word in ("captcha", "rate")
+            )
+            raise error
         try:
             payload = response.json()
         except ValueError as exc:
-            raise ZZapApiError(response.status_code, "ZZap response was not valid JSON") from exc
+            diagnostics = response_diagnostics(response, tuple(sensitive))
+            diagnostics["category"] = "invalid_response"
+            emit(
+                "zzap_api_request_failed",
+                warning=True,
+                method=method,
+                endpoint=endpoint,
+                query=query,
+                duration_seconds=time.monotonic() - started,
+                **diagnostics,
+            )
+            error = ZZapApiError(response.status_code, "ZZap response was not valid JSON")
+            error.category = "invalid_response"
+            error.actual_http_status = response.status_code
+            raise error from exc
         if not isinstance(payload, dict):
-            raise ZZapApiError(response.status_code, "ZZap response was not a JSON object")
+            diagnostics = response_diagnostics(response, tuple(sensitive))
+            diagnostics["category"] = "invalid_response"
+            emit(
+                "zzap_api_request_failed",
+                warning=True,
+                method=method,
+                endpoint=endpoint,
+                query=query,
+                duration_seconds=time.monotonic() - started,
+                **diagnostics,
+            )
+            error = ZZapApiError(response.status_code, "ZZap response was not a JSON object")
+            error.category = "invalid_response"
+            error.actual_http_status = response.status_code
+            raise error
         if payload.get("success") is False:
             error_code = response.status_code
             try:
                 error_code = int(payload.get("code") or response.status_code)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 pass
-            raise ZZapApiError(
-                error_code,
-                str(payload.get("errors")),
+            error = ZZapApiError(error_code, "ZZap API reported failure")
+            error.actual_http_status = response.status_code
+            error.category = "api_error"
+            error.legacy_backoff_hint = any(
+                word in str(payload.get("errors")).lower() for word in ("captcha", "rate")
             )
+            diagnostics = response_diagnostics(response, tuple(sensitive))
+            diagnostics["category"] = "api_error"
+            emit(
+                "zzap_api_request_failed",
+                warning=True,
+                method=method,
+                endpoint=endpoint,
+                query=query,
+                duration_seconds=time.monotonic() - started,
+                **diagnostics,
+            )
+            raise error
         return payload
 
 

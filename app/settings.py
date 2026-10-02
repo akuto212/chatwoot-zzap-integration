@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     chatwoot_api_token: str = Field(alias="CHATWOOT_API_TOKEN", repr=False)
     chatwoot_webhook_secret: str = Field(alias="CHATWOOT_WEBHOOK_SECRET", repr=False)
 
+    zzap_poll_degraded_seconds: float = Field(
+        default=120.0, gt=0, alias="ZZAP_POLL_DEGRADED_SECONDS"
+    )
+    metrics_token: str = Field(default="", alias="METRICS_TOKEN", repr=False)
+    metrics_cache_seconds: float = Field(default=5.0, ge=0, alias="METRICS_CACHE_SECONDS")
+    metrics_db_timeout_seconds: float = Field(default=5.0, gt=0, alias="METRICS_DB_TIMEOUT_SECONDS")
+
     max_attachment_bytes: int = Field(default=10 * 1024 * 1024, alias="MAX_ATTACHMENT_BYTES")
     successful_message_retention_days: int = Field(
         default=60,

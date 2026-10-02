@@ -756,6 +756,9 @@ async def test_thread_fetch_loads_all_pages_before_persisting(
     fail_second_page: bool,
 ) -> None:
 
+    from unittest.mock import AsyncMock
+
+    poll_health = AsyncMock()
     integration_id = uuid4()
     thread = _FakeThread(id=uuid4(), integration_id=integration_id, user_key="thread-1")
     queue = ZZapActionQueue()
@@ -821,7 +824,11 @@ async def test_thread_fetch_loads_all_pages_before_persisting(
             action_queue=queue,
             rate_limiter=limiter,
             monotonic=clock,
+            poll_health=poll_health,
         )
+
+    poll_health.record_attempt.assert_not_awaited()
+    poll_health.record_result.assert_not_awaited()
 
     page_count = max(1, (total_count + 19) // 20) if include_total else total_count // 20 + 1
     if fail_second_page and page_count > 1:
