@@ -82,7 +82,7 @@ Webhook должен содержать HMAC-заголовки Chatwoot:
 
 ## Rate Limit ZZap
 
-Все вызовы ZZap API проходят через один глобальный limiter: не более одного запроса каждые 3 секунды. Это включает:
+В одном активном worker все вызовы ZZap API используют общий limiter: минимум 3 секунды от завершения запроса до следующего. Гарантии между процессами и известные ограничения описаны в [документации мониторинга](docs/monitoring.md#повторный-403-и-аудит-лимита). Это включает:
 
 - summary polling;
 - загрузку сообщений отдельного thread;
@@ -110,3 +110,7 @@ rtk env UV_CACHE_DIR=/tmp/uv-cache uv run ruff check .
 rtk env UV_CACHE_DIR=/tmp/uv-cache uv run mypy app
 rtk env UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q
 ```
+
+## Диагностика и мониторинг ZZap
+
+Безопасные HTTP/network logs, durable health входящего polling и защищённый `/metrics`: [настройка Prometheus/Grafana, alerts и расследование 403](docs/monitoring.md).

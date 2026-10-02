@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -102,6 +103,13 @@ async def test_worker_closes_lock_connection_even_when_cleanup_fails(monkeypatch
     monkeypatch.setattr(jobs, "AsyncSession", lambda **_: session)
     for name in ("ZZapClient", "ChatwootClient", "InboundProcessor", "OutboundProcessor"):
         monkeypatch.setattr(jobs, name, MagicMock())
+    health = SimpleNamespace(initialize=AsyncMock())
+
+    async def monitor():
+        await asyncio.Event().wait()
+
+    health.monitor = monitor
+    monkeypatch.setattr(jobs, "PollHealth", lambda *args: health)
     monkeypatch.setattr(jobs, "try_worker_advisory_lock", AsyncMock(return_value=True))
     monkeypatch.setattr(jobs, "_run_cleanup_once", AsyncMock(side_effect=RuntimeError("cleanup")))
     monkeypatch.setattr(
@@ -113,6 +121,7 @@ async def test_worker_closes_lock_connection_even_when_cleanup_fails(monkeypatch
     )
     settings = SimpleNamespace(
         database_url="unused",
+        zzap_poll_degraded_seconds=120,
         zzap_regular_timeout_seconds=1,
         chatwoot_regular_timeout_seconds=1,
         zzap_base_url="https://example.test",
@@ -126,6 +135,7 @@ async def test_worker_closes_lock_connection_even_when_cleanup_fails(monkeypatch
     )
     with pytest.raises(RuntimeError, match="unlock" if unlock_fails else "cleanup"):
         await jobs.run_worker_loop(settings)
+    health.initialize.assert_awaited_once()
     connection.invalidate.assert_awaited_once()
     session.close.assert_awaited_once()
     engine.dispose.assert_awaited_once()

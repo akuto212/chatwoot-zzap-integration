@@ -1,0 +1,38 @@
+groups:
+  - name: zzap-integration
+    rules:
+      - alert: ZZapPollingDegraded
+        expr: zzap_poll_degraded{job="chatwoot-zzap"} == 1
+        for: 15s
+        labels:
+          severity: warning
+        annotations:
+          summary: "ZZap summary polling has had no success beyond its configured threshold"
+      - alert: ZZapWorkerHeartbeatStale
+        expr: ((time() - zzap_worker_last_heartbeat_timestamp_seconds{job="chatwoot-zzap"} > 120) and (zzap_worker_last_heartbeat_timestamp_seconds{job="chatwoot-zzap"} > 0)) or ((zzap_worker_last_heartbeat_timestamp_seconds{job="chatwoot-zzap"} == 0) and (zzap_poll_initialized_timestamp_seconds{job="chatwoot-zzap"} > 0) and (time() - zzap_poll_initialized_timestamp_seconds{job="chatwoot-zzap"} > 120))
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Worker heartbeat is absent or stale"
+      - alert: ZZapPollingHttpErrors
+        expr: (zzap_poll_consecutive_failures{job="chatwoot-zzap"} >= 3) and (zzap_poll_last_http_status{job="chatwoot-zzap"} >= 400) and (zzap_poll_failure_duration_seconds{job="chatwoot-zzap"} >= 120)
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prolonged polling failure; latest response is an HTTP error"
+      - alert: ZZapMetricsUnavailable
+        expr: up{job="chatwoot-zzap"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ZZap integration metrics cannot be scraped"
+      - alert: ZZapWorkerNeverInitialized
+        expr: zzap_poll_initialized_timestamp_seconds{job="chatwoot-zzap"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No worker polling state exists; check worker startup and database configuration"
