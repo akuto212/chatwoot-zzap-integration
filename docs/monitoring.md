@@ -1,6 +1,6 @@
 # Наблюдаемость ZZap
 
-Наблюдение не меняет polling, лимит 3 секунды, backoff, retry, авторизацию,
+Наблюдение не меняет polling, настраиваемый интервал запросов ZZap, backoff, retry, авторизацию,
 порядок запросов, пагинацию, дедупликацию или sync_jobs. Новых запросов ZZap нет.
 Новых сервисов, зависимостей и миграций БД нет.
 
@@ -8,6 +8,7 @@
 
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
+| `ZZAP_REQUEST_INTERVAL_SECONDS` | `3` | Пауза после каждого запроса ZZap и целевой интервал summary polling, минимум 3 секунды |
 | `ZZAP_POLL_DEGRADED_SECONDS` | `120` | Порог без успешного получения списка тредов, > 0 |
 | `METRICS_TOKEN` | пусто | Пусто: `/metrics` выключен (404); задано: обязательный Bearer token |
 | `METRICS_CACHE_SECONDS` | `5` | TTL одного небольшого SELECT service_state на web-процесс |
@@ -106,12 +107,16 @@ worker history закрывается отдельным startup alert `for: 2m`
 
 ## Grafana
 
-Добавить существующий Prometheus как datasource. Создать Stat для
-`zzap_poll_degraded` (0 зелёный/1 красный), Stat для HTTP status и error count;
-Time series для `zzap_poll_failure_duration_seconds`,
-`time() - zzap_last_success_timestamp_seconds` (фильтр last_success > 0),
-`time() - zzap_worker_last_heartbeat_timestamp_seconds`.
-Timestamps показывать как date/time, значения 0 как «ещё не было».
+Готовый импортируемый дашборд для Grafana 12/13: [JSON и инструкция](grafana/README.md).
+
+Добавить существующий Prometheus как datasource и импортировать
+[zzap-integration.json](grafana/zzap-integration.json). Выбрать datasource,
+Job и Instance. Дашборд содержит 6 панелей: доступность метрик, деградацию
+polling, свежесть heartbeat worker, ошибки подряд, последний HTTP-код
+и одну историю состояния. При failed scrape
+текущие значения exporter скрываются, чтобы старые samples не показывали
+здоровое состояние. Отсутствующие значения — «Нет данных».
+
 Logs брать из существующего сборщика stderr, фильтр event=zzap_api_request_failed
 и zzap_poll_degraded/zzap_poll_recovered; не переносить диагностические IDs в labels.
 
@@ -127,7 +132,8 @@ JSON envelope как возможную API-ошибку. Без признак�
 публичный egress IP из инфраструктуры; не передавать ключи, сообщения и user_key.
 Часовой 403 сам по себе не доказывает rate limit. Не менять IP/UA/auth/polling.
 
-Аудит текущего кода: один ZZapRateLimiter(3.0) создаётся run_worker_loop;
+Аудит текущего кода: один ZZapRateLimiter создаётся run_worker_loop с интервалом
+из ZZAP_REQUEST_INTERVAL_SECONDS (по умолчанию 3 секунды);
 GET summary и thread проходят process_next_zzap_action, POST/upload —
 RateLimitedZZapClient с тем же экземпляром; finally учитывает ошибки и exceptions.
 Пагинация сообщений использует result_info.total_count (с прежним fallback);
@@ -141,13 +147,13 @@ Session advisory lock на отдельном соединении исключ�
 lock исчезает; текущий цикл не проверяет его заново, а рабочие pool соединения
 могут восстановиться. Другой worker может взять lock, образовав два независимых
 limiter. Быстрый рестарт также теряет in-memory finish timestamp и может сделать
-первый запрос раньше 3 секунд после предыдущего worker. Это конкретные условные
+первый запрос раньше настроенного интервала после предыдущего worker. Это конкретные условные
 риски существующей реализации, а не установленная причина инцидента 2 октября;
 исправления lock lifetime/persistent limiter требуют отдельного согласования.
 
 Для фактического аудита проверить число процессов/контейнеров и общность БД,
 внешних клиентов ключа/IP и историю рестартов БД/worker. Сопоставить уже имеющиеся
-серверные/access traces ZZap и HTTP completion timestamps: минимум 3 секунды от
+серверные/access traces ZZap и HTTP completion timestamps: минимум ZZAP_REQUEST_INTERVAL_SECONDS от
 окончания любого запроса до старта следующего. Rate-limit unit tests покрывают
 общий limiter для GET/POST/upload и ошибки. Не включать full URL/request logging
 ради аудита; polling gauges не являются счётчиком всех ZZap запросов.
@@ -162,7 +168,7 @@ Worker heartbeat/polling — Prometheus, а не контейнерные restar
 
 Обновлять штатным управляемым процессом после review и backup согласно вашей
 практике; новых миграций нет. Проверить единичный worker и прекратить старый перед
-стартом нового; выдержать не менее 3 секунд после последнего ZZap запроса старого.
+стартом нового; выдержать не менее ZZAP_REQUEST_INTERVAL_SECONDS после последнего ZZap запроса старого.
 Прописать настройки, токен/сетевое ограничение и scrape/rules; проверить 401 без
 токена, 200 с токеном, gauges/heartbeat. Проверить controlled fixture 403 в staging,
 не блокировать production API искусственно. Секреты .env, БД и production процессы

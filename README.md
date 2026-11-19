@@ -34,6 +34,7 @@ CHATWOOT_WEBHOOK_SECRET=replace-me
 Опциональные переменные:
 
 ```dotenv
+ZZAP_REQUEST_INTERVAL_SECONDS=3
 MAX_ATTACHMENT_BYTES=10485760
 SUCCESSFUL_MESSAGE_RETENTION_DAYS=60
 FAILED_RECORD_RETENTION_DAYS=30
@@ -82,14 +83,16 @@ Webhook должен содержать HMAC-заголовки Chatwoot:
 
 ## Rate Limit ZZap
 
-В одном активном worker все вызовы ZZap API используют общий limiter: минимум 3 секунды от завершения запроса до следующего. Гарантии между процессами и известные ограничения описаны в [документации мониторинга](docs/monitoring.md#повторный-403-и-аудит-лимита). Это включает:
+В одном активном worker все вызовы ZZap API используют общий limiter: пауза от завершения запроса до следующего задаётся `ZZAP_REQUEST_INTERVAL_SECONDS` (по умолчанию 3 секунды, минимум 3). Гарантии между процессами и известные ограничения описаны в [документации мониторинга](docs/monitoring.md#повторный-403-и-аудит-лимита). Это включает:
 
 - summary polling;
 - загрузку сообщений отдельного thread;
 - загрузку файлов;
 - отправку исходящих сообщений.
 
-Summary polling планируется каждые 3 секунды как целевой интервал, а не как гарантия. Если в очереди уже есть fetch, upload или outbound send, polling ждет своей очереди в той же FIFO-очереди. При ZZap `401` polling переходит на редкие retry, а `/ready` становится unhealthy. При `429`, rate-limit или captcha-like ответах scheduler увеличивает backoff, но readiness остается healthy.
+Summary polling планируется с тем же интервалом как целевой частотой, а не как гарантией. Если в очереди уже есть fetch, upload или outbound send, polling ждет своей очереди в той же FIFO-очереди. При ZZap `401` polling переходит на редкие retry, а `/ready` становится unhealthy. При `429`, rate-limit или captcha-like ответах scheduler увеличивает backoff, но readiness остается healthy.
+
+Значение меняется в `.env`; после изменения пересоздайте контейнер worker (или app в режиме all). Настройка ограничивает только запросы этой интеграции; другие сервисы используют собственные лимиты. При большом интервале и очереди фактическая пауза между summary poll может превысить `ZZAP_POLL_DEGRADED_SECONDS`; порог мониторинга настраивается отдельно.
 
 ## Известные ограничения
 
@@ -114,3 +117,8 @@ rtk env UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q
 ## Диагностика и мониторинг ZZap
 
 Безопасные HTTP/network logs, durable health входящего polling и защищённый `/metrics`: [настройка Prometheus/Grafana, alerts и расследование 403](docs/monitoring.md).
+
+Компактный [дашборд Grafana](docs/grafana/zzap-integration.json): доступность
+метрик, polling, worker, ошибки, HTTP-код и одна история состояния.
+[Инструкция по импорту](docs/grafana/README.md): загрузить JSON в Grafana,
+выбрать Prometheus datasource, затем Job и Instance.
