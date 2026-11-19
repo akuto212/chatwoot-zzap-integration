@@ -23,6 +23,9 @@ class Settings(BaseSettings):
 
     zzap_base_url: str = Field(alias="ZZAP_BASE_URL")
     zzap_api_key: str = Field(alias="ZZAP_API_KEY", repr=False)
+    zzap_request_interval_seconds: float = Field(
+        default=3.0, ge=3.0, allow_inf_nan=False, alias="ZZAP_REQUEST_INTERVAL_SECONDS"
+    )
 
     chatwoot_base_url: str = Field(alias="CHATWOOT_BASE_URL")
     chatwoot_account_id: int = Field(alias="CHATWOOT_ACCOUNT_ID")

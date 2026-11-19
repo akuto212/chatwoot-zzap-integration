@@ -149,7 +149,7 @@ async def run_worker_loop(settings: Settings) -> None:
     session_factory = create_session_factory(engine)
     worker_id = f"worker-{uuid4()}"
     action_queue = ZZapActionQueue()
-    rate_limiter = ZZapRateLimiter(interval_seconds=3.0)
+    rate_limiter = ZZapRateLimiter(interval_seconds=settings.zzap_request_interval_seconds)
 
     async with httpx.AsyncClient(timeout=settings.zzap_regular_timeout_seconds) as zzap_http:
         async with httpx.AsyncClient(
@@ -286,7 +286,7 @@ async def run_worker_iteration(
 
     scheduled = action_queue.enqueue_summary_poll_if_due(
         now=(monotonic or time.monotonic)(),
-        interval_seconds=3.0,
+        interval_seconds=rate_limiter.interval_seconds,
     )
     did_work = scheduled or did_work
     did_work = (

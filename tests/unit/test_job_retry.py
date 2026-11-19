@@ -314,7 +314,8 @@ async def test_process_claimed_job_exhausts_inbound_and_marks_mapping_failed() -
 
 
 @pytest.mark.asyncio
-async def test_rate_limited_zzap_client_waits_between_requests() -> None:
+@pytest.mark.parametrize("interval", [3.0, 45.0])
+async def test_rate_limited_zzap_client_waits_between_requests(interval: float) -> None:
     sleep_delays: list[float] = []
     clock = _MutableClock(10.0)
     inner = _FakeZZapApiClient(clock=clock)
@@ -325,7 +326,7 @@ async def test_rate_limited_zzap_client_waits_between_requests() -> None:
 
     client = RateLimitedZZapClient(
         inner,
-        limiter=ZZapRateLimiter(interval_seconds=3.0),
+        limiter=ZZapRateLimiter(interval_seconds=interval),
         sleep=fake_sleep,
         monotonic=clock,
     )
@@ -339,20 +340,22 @@ async def test_rate_limited_zzap_client_waits_between_requests() -> None:
         is_online=True,
     )
 
-    assert sleep_delays == [1.0]
+    assert sleep_delays == [interval - 2.0]
     assert inner.calls == ["upload", "send"]
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("interval", [3.0, 45.0])
 async def test_zzap_polling_limiter_waits_after_request_finishes(
     monkeypatch: pytest.MonkeyPatch,
+    interval: float,
 ) -> None:
     integration_id = uuid4()
     clock = _MutableClock(10.0)
     queue = ZZapActionQueue()
     queue.enqueue_summary_poll()
     zzap_client = _ClockedZZapApiClient(clock)
-    rate_limiter = ZZapRateLimiter(interval_seconds=3.0)
+    rate_limiter = ZZapRateLimiter(interval_seconds=interval)
 
     async def fake_process_summary_threads(*args: object, **kwargs: object) -> None:
         cast(ZZapActionQueue, kwargs["action_queue"]).enqueue_thread_fetch("thread-1")
@@ -385,6 +388,55 @@ async def test_zzap_polling_limiter_waits_after_request_finishes(
 
     assert did_work is False
     assert zzap_client.calls == ["list_threads"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interval", [3.0, 45.0])
+async def test_worker_schedules_summary_poll_with_request_interval(
+    monkeypatch: pytest.MonkeyPatch,
+    interval: float,
+) -> None:
+    queue = ZZapActionQueue()
+    limiter = ZZapRateLimiter(interval_seconds=interval)
+    clock = _MutableClock(10.0)
+
+    async def no_stale_jobs(*args: Any, **kwargs: Any) -> int:
+        return 0
+
+    async def no_action(*args: Any, **kwargs: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(jobs, "session_scope", lambda factory: _FakeSessionScope())
+    monkeypatch.setattr(jobs, "reset_stale_processing_jobs", no_stale_jobs)
+    monkeypatch.setattr(jobs, "claim_next_job", _async_noop)
+    monkeypatch.setattr(jobs, "process_next_zzap_action", no_action)
+    monkeypatch.setattr(jobs, "_upsert_service_state", _async_noop)
+
+    async def iterate() -> bool:
+        return await jobs.run_worker_iteration(
+            session_factory=cast(Any, object()),
+            settings=cast(Any, _FakeSettings(integration_id=uuid4())),
+            worker_id="worker-1",
+            inbound_processor=None,
+            outbound_processor=None,
+            chatwoot_client=None,
+            zzap_client=None,
+            action_queue=queue,
+            rate_limiter=limiter,
+            monotonic=clock,
+        )
+
+    assert await iterate() is True
+    action = queue.pop_next()
+    assert action is not None
+    assert action.action_type == ZZapActionType.SUMMARY_POLL
+    clock.value = 10.0 + interval - 0.001
+    assert await iterate() is False
+    assert queue.size() == 0
+
+    clock.value = 10.0 + interval
+    assert await iterate() is True
+    assert queue.size() == 1
 
 
 @pytest.mark.asyncio
